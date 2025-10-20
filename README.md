@@ -1,16 +1,7 @@
-# poliedro_flutter
+# Projeto-Integrador-Interdisciplinar---Desenvolvimento-Multiplataforma
+Site Pessoal de Professor para Compartilhamento de Materiais, Notas e Mensagens para a escola Poliedro.
 
-A new Flutter project.
+Objetivo:
 
-## Getting Started
+O projeto tem como objetivo o desenvolvimento de uma plataforma web pessoal para professores, com foco em compartilhamento de conteúdos, envio de mensagens individuais e divulgação segura de notas. A aplicação é acessível por multiplataforma (web/desktop e mobile), com autenticação por RA e senha, respeitando princípios de segurança, privacidade e usabilidade.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
