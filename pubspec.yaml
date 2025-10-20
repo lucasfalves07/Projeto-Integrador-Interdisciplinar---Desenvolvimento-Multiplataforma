@@ -1,0 +1,63 @@
+name: poliedro_flutter
+description: "Projeto Flutter migrado do front em React"
+publish_to: 'none' # Evita publicação acidental
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # -------------------------
+  # 🔥 Firebase (backend na nuvem)
+  # -------------------------
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.4.0
+  cloud_firestore: ^5.6.0
+  firebase_storage: ^12.4.0       # Upload de PDFs, imagens, vídeos etc.
+  firebase_messaging: ^15.2.10    # ✅ Compatível com firebase_core 3.x
+  file_picker: ^8.3.7
+  url_launcher: ^6.3.0
+
+  # -------------------------
+  # 💾 Banco local (cache/offline)
+  # -------------------------
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  path_provider: ^2.1.3
+
+  # -------------------------
+  # 🎨 UI, tema e utilitários
+  # -------------------------
+  cupertino_icons: ^1.0.8
+  provider: ^6.1.2
+  go_router: ^14.8.1
+  shared_preferences: ^2.3.3
+  intl: ^0.19.0
+  fl_chart: ^0.68.0
+  another_flushbar: ^1.12.30
+  animations: ^2.0.11
+  google_fonts: ^6.2.1
+  dynamic_color: ^1.6.6
+
+  # -------------------------
+  # 📊 Exportação e relatórios
+  # -------------------------
+  excel: ^4.0.6             # Geração de planilhas Excel (.xlsx)
+  pdf: ^3.11.1              # Geração de relatórios em PDF
+  printing: ^5.14.0         # Impressão e visualização de PDFs
+  share_plus: ^10.1.4       # Compartilhamento de arquivos (PDF/Excel)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/poliedro-logo.png
