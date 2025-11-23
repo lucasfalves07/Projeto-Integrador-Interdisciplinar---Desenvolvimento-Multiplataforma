@@ -1,0 +1,384 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+    function isSignedIn()          { return request.auth != null; }
+    function isSelf(uid)           { return isSignedIn() && request.auth.uid == uid; }
+    function userDoc(uid)          { return get(/databases/$(database)/documents/users/$(uid)); }
+    function userExists(uid)       { return exists(/databases/$(database)/documents/users/$(uid)); }
+    function me()                  { return userDoc(request.auth.uid); }
+    function turmaDoc(turmaId)     { return get(/databases/$(database)/documents/turmas/$(turmaId)); }
+    function disciplinaDoc(disId)  { return get(/databases/$(database)/documents/disciplinas/$(disId)); }
+    function disciplinaTurmaId(disId) { return disciplinaDoc(disId).data.turmaId; }
+    function materialTurmaId(data) {
+      if (data.turmaId != null) {
+        return data.turmaId;
+      }
+      if (data.visivelPara is string) {
+        return data.visivelPara;
+      }
+      if (data.visivelPara is list && data.visivelPara.size() > 0) {
+        return data.visivelPara[0];
+      }
+      return null;
+    }
+
+    function isProfessor() {
+      return isSignedIn()
+        && userExists(request.auth.uid)
+        && (
+             (('role'   in me().data) && me().data.role   == 'professor') ||
+             (('tipo'   in me().data) && me().data.tipo   == 'professor') ||
+             (('perfil' in me().data) && me().data.perfil == 'professor')
+           );
+    }
+
+    function isTeacherOfTurma(tId) {
+      return isSignedIn()
+        && turmaDoc(tId).data.professorId == request.auth.uid;
+    }
+
+    function isTeacherOfTurmaResource(data) {
+      return isSignedIn()
+        && (data.professorId != null)
+        && data.professorId == request.auth.uid;
+    }
+
+    // users.turmas pode ser lista ou string (legado)
+    function isMemberOfTurma(tId) {
+      return isSignedIn()
+        && userExists(request.auth.uid)
+        && ('turmas' in me().data)
+        && (
+             (me().data.turmas is list   && tId in me().data.turmas) ||
+             (me().data.turmas is string && me().data.turmas == tId)
+           );
+    }
+
+    function currentUserHasRa() {
+      return isSignedIn()
+        && userExists(request.auth.uid)
+        && ('ra' in me().data);
+    }
+
+    function currentUserRa() {
+      return currentUserHasRa() ? me().data.ra : null;
+    }
+
+    function threadProfessorId(target) {
+      if (target.professorId != null) return target.professorId;
+      if (target.professorUid != null) return target.professorUid;
+      if (target.profId != null) return target.profId;
+      return null;
+    }
+
+    function requestThreadProfessorId() {
+      if (request.resource.data.professorId != null) return request.resource.data.professorId;
+      if (request.resource.data.professorUid != null) return request.resource.data.professorUid;
+      if (request.resource.data.profId != null) return request.resource.data.profId;
+      return null;
+    }
+
+    // ============================================================
+    // users
+    // ============================================================
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isProfessor();
+
+      allow create: if isSelf(uid);
+
+      allow update: if
+        (
+          isSelf(uid) &&
+          request.resource.data.diff(resource.data).changedKeys()
+            .hasOnly(['telefone','theme','prefs','dateFormat','updatedAt','nome','fcmToken','tokenUpdatedAt'])
+        )
+        ||
+        (
+          // permitir definição inicial de tipo/perfil/role ausentes
+          isSelf(uid) &&
+          (
+            (!('tipo' in resource.data)   && ('tipo'   in request.resource.data))   ||
+            (!('role' in resource.data)   && ('role'   in request.resource.data))   ||
+            (!('perfil' in resource.data) && ('perfil' in request.resource.data))
+          )
+        )
+        ||
+        (
+          isProfessor() &&
+          (
+            (('tipo'   in resource.data) && resource.data.tipo   == 'aluno') ||
+            (('role'   in resource.data) && resource.data.role   == 'aluno') ||
+            (('perfil' in resource.data) && resource.data.perfil == 'aluno')
+          ) &&
+          request.resource.data.diff(resource.data).changedKeys()
+            .hasOnly(['turmas','ra','nome','updatedAt'])
+        );
+
+      allow delete: if false;
+    }
+
+    match /users/{uid}/prefs/{docId} {
+      allow read, write: if isSelf(uid);
+    }
+
+    // ============================================================
+    // alunos (coleção paralela por RA)
+    // ============================================================
+    match /alunos/{ra} {
+      allow read, create, update, delete: if isProfessor();
+    }
+
+    match /alunos/{ra}/notas/{docId} {
+      allow read, create, update, delete: if isProfessor();
+    }
+
+    // ============================================================
+    // turmas e subcoleções
+    // ============================================================
+    match /turmas/{turmaId} {
+        allow read: if isTeacherOfTurmaResource(resource.data) || isMemberOfTurma(turmaId);
+        allow create: if isProfessor() && request.resource.data.professorId == request.auth.uid;
+        allow update, delete: if isTeacherOfTurmaResource(resource.data)
+          && request.resource.data.professorId == resource.data.professorId;
+      }
+
+    match /turmas/{turmaId}/materiais/{materialId} {
+      allow read: if isTeacherOfTurma(turmaId) || isMemberOfTurma(turmaId);
+      allow create, update, delete: if isTeacherOfTurma(turmaId);
+    }
+
+    match /turmas/{turmaId}/mensagens/{msgId} {
+      allow read: if isTeacherOfTurma(turmaId) || isMemberOfTurma(turmaId);
+      allow create: if isSignedIn() && (isTeacherOfTurma(turmaId) || isMemberOfTurma(turmaId));
+      allow update, delete: if false;
+    }
+
+    // ============================================================
+    // disciplinas
+    // ============================================================
+    match /disciplinas/{id} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isProfessor();
+    }
+
+    match /disciplinas/{disciplinaId}/materiais/{materialId} {
+      allow read: if isTeacherOfTurma(disciplinaTurmaId(disciplinaId))
+               || isMemberOfTurma(disciplinaTurmaId(disciplinaId));
+      allow create, update, delete: if isTeacherOfTurma(disciplinaTurmaId(disciplinaId));
+    }
+
+    match /disciplinas/{disciplinaId}/topicos/{topicoId}/materiais/{materialId} {
+      allow read: if isTeacherOfTurma(disciplinaTurmaId(disciplinaId))
+               || isMemberOfTurma(disciplinaTurmaId(disciplinaId));
+      allow create, update, delete: if isTeacherOfTurma(disciplinaTurmaId(disciplinaId));
+    }
+
+    // ============================================================
+    // materiais (tabela achatada com turmaId)
+    // ============================================================
+    match /materiais/{id} {
+      allow read: if materialTurmaId(resource.data) != null &&
+        (isTeacherOfTurma(materialTurmaId(resource.data))
+          || isMemberOfTurma(materialTurmaId(resource.data)));
+
+      allow create, update, delete: if isTeacherOfTurma(
+        request.resource.data.turmaId != null
+          ? request.resource.data.turmaId
+          : resource.data.turmaId
+      );
+    }
+
+    // ============================================================
+    // atividades
+    // ============================================================
+    match /atividades/{id} {
+      allow read: if isTeacherOfTurma(resource.data.turmaId)
+               || isMemberOfTurma(resource.data.turmaId);
+
+      allow create, update, delete: if isTeacherOfTurma(
+        request.resource.data.turmaId != null
+          ? request.resource.data.turmaId
+          : resource.data.turmaId
+      );
+    }
+
+    // ============================================================
+    // entregas (submissão do aluno)
+    // ============================================================
+    match /entregas/{id} {
+      allow read: if
+        isSelf(resource.data.alunoUid) ||
+        (currentUserHasRa() && resource.data.alunoRa == currentUserRa()) ||
+        (isProfessor() && resource.data.professorId == request.auth.uid) ||
+        isTeacherOfTurma(resource.data.turmaId);
+
+      allow create, update: if isSelf(request.resource.data.alunoUid);
+
+      allow delete: if isSelf(resource.data.alunoUid)
+                 || (isProfessor() && resource.data.professorId == request.auth.uid);
+    }
+
+    // ============================================================
+    // notas
+    // ============================================================
+    match /notas/{id} {
+      function turmaDaAtividade(atvId) {
+        return get(/databases/$(database)/documents/atividades/$(atvId)).data.turmaId;
+      }
+
+      allow read: if
+        isSelf(resource.data.alunoUid) ||
+        (currentUserHasRa() && resource.data.alunoRa == currentUserRa()) ||
+        (isProfessor() && resource.data.professorId == request.auth.uid) ||
+        isTeacherOfTurma(turmaDaAtividade(resource.data.atividadeId));
+
+      allow create, update, delete: if isTeacherOfTurma(
+        turmaDaAtividade(
+          request.resource.data.atividadeId != null
+            ? request.resource.data.atividadeId
+            : resource.data.atividadeId
+        )
+      );
+    }
+
+    // ============================================================
+    // coleção raiz mensagens (legado)
+    // ============================================================
+    match /mensagens/{id} {
+      allow read: if
+        (resource.data.turmaId != null &&
+          (isTeacherOfTurma(resource.data.turmaId) || isMemberOfTurma(resource.data.turmaId)))
+        || (resource.data.de == request.auth.uid)
+        || (resource.data.toUid != null && resource.data.toUid == request.auth.uid);
+
+      allow create: if request.resource.data.de == request.auth.uid && (
+        (request.resource.data.turmaId != null &&
+          (isTeacherOfTurma(request.resource.data.turmaId) || isMemberOfTurma(request.resource.data.turmaId)))
+        || (request.resource.data.toUid != null && request.resource.data.toUid != '')
+      );
+
+      allow update, delete: if
+        (resource.data.de == request.auth.uid) ||
+        (resource.data.turmaId != null && isTeacherOfTurma(resource.data.turmaId));
+    }
+
+    // ============================================================
+    // threads privadas
+    // ============================================================
+    match /threads/{threadId} {
+      function isTeacherThread() {
+        return isProfessor() && threadProfessorId(resource.data) == request.auth.uid;
+      }
+
+      function isAlunoThread() {
+        return isSignedIn()
+          && (
+            (resource.data.alunoUid != null && resource.data.alunoUid == request.auth.uid)
+            || (
+              currentUserHasRa()
+              && resource.data.alunoRa != null
+              && resource.data.alunoRa == currentUserRa()
+            )
+          );
+      }
+
+      allow read: if isTeacherThread() || isAlunoThread();
+
+      allow create: if (
+        isProfessor()
+          && requestThreadProfessorId() == request.auth.uid
+          && (request.resource.data.alunoRa is string)
+          && (request.resource.data.participantes is list)
+      ) || (
+        currentUserHasRa()
+          && (request.resource.data.alunoRa is string)
+          && request.resource.data.alunoRa == currentUserRa()
+          && (requestThreadProfessorId() is string)
+          && (request.resource.data.participantes is list)
+          && (
+            !('alunoUid' in request.resource.data)
+            || request.resource.data.alunoUid == request.auth.uid
+          )
+      );
+
+      allow update: if isTeacherThread() || isAlunoThread();
+
+      allow delete: if isTeacherThread();
+
+      match /itens/{itemId} {
+        allow read: if isTeacherThread() || isAlunoThread();
+        allow create: if isSignedIn()
+          && (
+              (isTeacherThread() && request.resource.data.fromUid == request.auth.uid) ||
+              (isAlunoThread()   && request.resource.data.fromUid == request.auth.uid)
+             );
+        allow update, delete: if false;
+      }
+    }
+
+    // ============================================================
+    // comentários (dúvidas/aluno x professor)
+    // ============================================================
+    match /comentarios/{comentarioId} {
+      function comentarioTurma(target) {
+        return target.turmaId;
+      }
+
+      function comentarioEhDoAluno(target) {
+        return isSignedIn() && (
+          (target.alunoUid != null && target.alunoUid == request.auth.uid) ||
+          (
+            userExists(request.auth.uid) &&
+            ('ra' in me().data) &&
+            (target.alunoRa != null) &&
+            me().data.ra == target.alunoRa
+          )
+        );
+      }
+
+      allow read: if comentarioEhDoAluno(resource.data)
+               || (comentarioTurma(resource.data) != null
+                   && isTeacherOfTurma(comentarioTurma(resource.data)));
+
+      allow create: if isSignedIn()
+                && comentarioTurma(request.resource.data) != null
+                && request.resource.data.alunoUid == request.auth.uid
+                && isMemberOfTurma(comentarioTurma(request.resource.data));
+
+      allow update: if comentarioTurma(resource.data) != null
+                 && isTeacherOfTurma(comentarioTurma(resource.data));
+
+      allow delete: if false;
+    }
+
+    // ============================================================
+    // boletins / notificações / metadados
+    // ============================================================
+    match /boletins/{id} {
+      allow read: if isSignedIn();
+      allow create, update: if isProfessor();
+      allow delete: if false;
+    }
+
+    match /notificacoes/{id} {
+      allow read: if isSelf(resource.data.destinatarioUid) || isProfessor();
+      allow create, delete: if isProfessor();
+      allow update: if isSelf(resource.data.destinatarioUid);
+    }
+
+    match /meta/{doc}     { allow read: if true; allow write: if false; }
+    match /app_meta/{doc} { allow read: if true; allow write: if false; }
+
+    match /config/{docId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if false;
+    }
+
+    // nenhuma regra catch-all liberando leituras
+  }
+}
+

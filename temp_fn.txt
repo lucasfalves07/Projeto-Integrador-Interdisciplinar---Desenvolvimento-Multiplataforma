@@ -1,0 +1,31 @@
+  Future<void> _enviarPrivado() async {
+    final texto = _msgPrivadaCtrl.text.trim();
+    if (texto.isEmpty || _profSelecionado == null) return;
+
+    final profUid = _profSelecionado!;
+    // key removido (usamos thread aleatória)
+
+    try {
+      final threadRef =
+          FirebaseFirestore.instance.collection('threads').doc(key);
+
+      await threadRef.set({
+        'professorId': profUid,
+        'alunoRa': _alunoRA,
+        'participantes': [profUid, _alunoRA],
+        'aberto': true,
+        'lastMessage': texto,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      await threadRef.collection('itens').add({ // âœ… troca para 'itens'
+        'texto': texto,
+        'fromUid': _alunoUid,
+        'toUid': profUid,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      _msgPrivadaCtrl.clear();
+    } catch (e) {
+      _showError('Erro ao enviar mensagem privada: $e');
+    }
