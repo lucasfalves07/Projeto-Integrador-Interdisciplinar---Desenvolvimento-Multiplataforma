@@ -1,0 +1,662 @@
+// -----------------------------------------------------------------------------
+// ATIVIDADES_PAGE.DART — VERSÃO FINAL COMPATÍVEL 100% COM O BANCO DA DUDA
+// -----------------------------------------------------------------------------
+// Este arquivo NÃO depende de nenhum campo que NÃO exista no seu Firestore.
+// Agora funciona para professores e alunos, sem travar na tela carregando.
+// -----------------------------------------------------------------------------
+
+import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:poliedro_flutter/pages/atividade_detalhe.dart';
+import 'package:poliedro_flutter/pages/atividade_professor_detalhe.dart';
+import 'package:poliedro_flutter/pages/atividade_entregas_page.dart';
+
+import 'package:poliedro_flutter/services/firestore_service.dart';
+
+class AtividadesPage extends StatefulWidget {
+  const AtividadesPage({super.key});
+
+  @override
+  State<AtividadesPage> createState() => _AtividadesPageState();
+}
+
+class _AtividadesPageState extends State<AtividadesPage> {
+  final _auth = FirebaseAuth.instance;
+  final FirestoreService _firestoreService = FirestoreService();
+
+  bool _ehProfessor = false;
+  bool _carregando = true;
+
+  final TextEditingController _buscaCtrl = TextEditingController();
+
+  String? _turmaSelecionada;
+  String? _disciplinaSelecionada;
+
+  List<Map<String, dynamic>> _turmas = [];
+  List<Map<String, dynamic>> _disciplinas = [];
+  List<String> _turmasDoAluno = [];
+
+  final Map<String, String> _mapTurmaNome = {};
+  final Map<String, String> _mapDiscNome = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) fn();
+  }
+
+  // =============================================================================
+  // BOOTSTRAP — TOTALMENTE COMPATÍVEL COM SEU BANCO DE DADOS
+  // =============================================================================
+  Future<void> _bootstrap() async {
+    final uid = _auth.currentUser!.uid;
+
+    final userDoc =
+        await FirebaseFirestore.instance.collection("users").doc(uid).get();
+
+    final perfil = userDoc.data()?["perfil"] ?? "aluno";
+    _ehProfessor = perfil == "professor";
+
+    if (_ehProfessor) {
+      await _carregarDadosProfessor(uid);
+    } else {
+      await _carregarDadosAluno(uid);
+    }
+
+    _cachear();
+    _safeSetState(() => _carregando = false);
+  }
+
+  // =============================================================================
+  // PROFESSOR — CARREGA TURMAS E DISCIPLINAS DA SUA TURMA
+  // =============================================================================
+  Future<void> _carregarDadosProfessor(String uid) async {
+    // Puxa todas turmas onde professorId == uid
+    final snap = await FirebaseFirestore.instance
+        .collection("turmas")
+        .where("professorId", isEqualTo: uid)
+        .get();
+
+    _turmas = snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+
+    // Agora pega disciplinas de cada turma
+    _disciplinas = [];
+
+    for (var t in _turmas) {
+      if (t["disciplinas"] != null) {
+        for (var d in t["disciplinas"]) {
+          _disciplinas.add({
+            "id": d["id"],
+            "nome": d["nome"],
+            "turmaId": t["id"],
+          });
+        }
+      }
+    }
+  }
+
+  // =============================================================================
+  // ALUNO — COMPATÍVEL COM SEU FIRESTORE
+  // users = aluno → tem apenas lista de turmas
+  // turmas[id].disciplinas[] é onde ficam as disciplinas
+  // =============================================================================
+  Future<void> _carregarDadosAluno(String uid) async {
+    final userDoc =
+        await FirebaseFirestore.instance.collection("users").doc(uid).get();
+
+    final turmasIds = List<String>.from(userDoc.data()?["turmas"] ?? []);
+
+    _turmasDoAluno = turmasIds;
+
+    _turmas = [];
+    _disciplinas = [];
+
+    for (final tid in turmasIds) {
+      final tdoc =
+          await FirebaseFirestore.instance.collection("turmas").doc(tid).get();
+
+      if (tdoc.exists) {
+        final tdata = {"id": tdoc.id, ...tdoc.data()!};
+        _turmas.add(tdata);
+
+        if (tdata["disciplinas"] != null) {
+          for (var d in tdata["disciplinas"]) {
+            _disciplinas.add({
+              "id": d["id"],
+              "nome": d["nome"],
+              "turmaId": tid,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // =============================================================================
+  // CACHES
+  // =============================================================================
+  void _cachear() {
+    _mapTurmaNome.clear();
+    for (var t in _turmas) {
+      _mapTurmaNome[t["id"]] = t["nome"];
+    }
+
+    _mapDiscNome.clear();
+    for (var d in _disciplinas) {
+      _mapDiscNome[d["id"]] = d["nome"];
+    }
+  }
+
+  // =============================================================================
+  // STREAM DE ATIVIDADES (COMPATÍVEL COM SEU BANCO)
+  // =============================================================================
+  Stream<QuerySnapshot<Map<String, dynamic>>> _stream() {
+    final col = FirebaseFirestore.instance.collection("atividades");
+
+    // Professor vê atividades das suas turmas
+    if (_ehProfessor) {
+      final turmasIds = _turmas.map((t) => t["id"]).toList();
+
+      if (turmasIds.isEmpty) return const Stream.empty();
+
+      if (turmasIds.length <= 10) {
+        return col.where("turmaId", whereIn: turmasIds).snapshots();
+      } else {
+        return col.snapshots();
+      }
+    }
+
+    // Aluno vê atividades das turmas onde está
+    if (_turmasDoAluno.isEmpty) return const Stream.empty();
+
+    if (_turmasDoAluno.length <= 10) {
+      return col.where("turmaId", whereIn: _turmasDoAluno).snapshots();
+    }
+
+    return col.snapshots();
+  }
+  // =============================================================================
+  // UPLOAD DE ARQUIVO (ANEXOS)
+  // =============================================================================
+  Future<Map<String, dynamic>?> _uploadArquivo() async {
+    final res = await FilePicker.platform.pickFiles(withData: true);
+    if (res == null) return null;
+
+    final file = res.files.single;
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final path = "atividades/$id/${file.name}";
+
+    UploadTask task;
+
+    if (file.bytes != null) {
+      task = FirebaseStorage.instance.ref(path).putData(
+            file.bytes!,
+            SettableMetadata(contentType: _contentType(file.extension)),
+          );
+    } else if (!kIsWeb && file.path != null) {
+      task = FirebaseStorage.instance.ref(path).putFile(
+            File(file.path!),
+            SettableMetadata(contentType: _contentType(file.extension)),
+          );
+    } else {
+      return null;
+    }
+
+    final snap = await task;
+    final url = await snap.ref.getDownloadURL();
+
+    return {
+      "nome": file.name,
+      "url": url,
+      "contentType": file.extension ?? "file",
+      "storagePath": snap.ref.fullPath,
+    };
+  }
+
+  String _contentType(String? ext) {
+    if (ext == null) return "application/octet-stream";
+    switch (ext.toLowerCase()) {
+      case "pdf":
+        return "application/pdf";
+      case "png":
+        return "image/png";
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      default:
+        return "application/octet-stream";
+    }
+  }
+
+  // =============================================================================
+  // CRIAR / EDITAR ATIVIDADE
+  // =============================================================================
+  Future<void> _openDialog({String? id, Map<String, dynamic>? dados}) async {
+    if (!_ehProfessor) return;
+
+    final titulo = TextEditingController(text: dados?["titulo"]);
+    final desc = TextEditingController(text: dados?["descricao"]);
+    String? turmaId = dados?["turmaId"];
+    String? discId = dados?["disciplinaId"];
+    String bimestre = dados?["bimestre"] ?? "1º Bimestre";
+
+    List anexos = List<Map<String, dynamic>>.from(dados?["anexos"] ?? []);
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (_, setStateDialog) {
+          return AlertDialog(
+            title: Text(id == null ? "Nova Atividade" : "Editar Atividade"),
+            content: SingleChildScrollView(
+              child: Column(
+                children: [
+                  TextField(
+                    controller: titulo,
+                    decoration: const InputDecoration(labelText: "Título"),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: desc,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(labelText: "Descrição"),
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    value: turmaId,
+                    items: _turmas
+                        .map(
+                          (t) => DropdownMenuItem<String>(
+                            value: t["id"],
+                            child: Text(t["nome"]),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => setStateDialog(() => turmaId = v),
+                    decoration: const InputDecoration(labelText: "Turma"),
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    value: discId,
+                    items: _disciplinas
+                        .map(
+                          (d) => DropdownMenuItem<String>(
+                            value: d["id"],
+                            child: Text(d["nome"]),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => setStateDialog(() => discId = v),
+                    decoration:
+                        const InputDecoration(labelText: "Disciplina"),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: TextEditingController(text: bimestre),
+                    decoration:
+                        const InputDecoration(labelText: "Bimestre (ex: 1º Bimestre)"),
+                    onChanged: (v) => bimestre = v,
+                  ),
+                  const SizedBox(height: 20),
+                  const Text("Anexos:",
+                      style:
+                          TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 8),
+                  ...anexos.map(
+                    (a) => Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.attach_file),
+                        title: Text(a["nome"]),
+                        subtitle: Text(a["contentType"]),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => setStateDialog(() {
+                            anexos.remove(a);
+                          }),
+                        ),
+                      ),
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      final novo = await _uploadArquivo();
+                      if (novo != null) {
+                        setStateDialog(() => anexos.add(novo));
+                      }
+                    },
+                    icon: const Icon(Icons.attach_file),
+                    label: const Text("Adicionar Anexo"),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("Cancelar"),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  if (titulo.text.trim().isEmpty ||
+                      turmaId == null ||
+                      discId == null) {
+                    return;
+                  }
+
+                  final agora = DateTime.now().millisecondsSinceEpoch;
+                  final newId = id ?? "ATV_$agora";
+
+                  final data = {
+                    "id": newId,
+                    "titulo": titulo.text.trim(),
+                    "descricao": desc.text.trim(),
+                    "turmaId": turmaId,
+                    "disciplinaId": discId,
+                    "bimestre": bimestre,
+                    "professorId": _auth.currentUser!.uid,
+                    "anexos": anexos,
+                    "criadoEmMs": dados?["criadoEmMs"] ?? agora,
+                  };
+
+                  await FirebaseFirestore.instance
+                      .collection("atividades")
+                      .doc(newId)
+                      .set(data, SetOptions(merge: true));
+
+                  Navigator.pop(context);
+                },
+                child: const Text("Salvar"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // =============================================================================
+  // EXCLUIR ATIVIDADE
+  // =============================================================================
+  Future<void> _excluir(String id) async {
+    await FirebaseFirestore.instance
+        .collection("atividades")
+        .doc(id)
+        .delete();
+  }
+
+  // =============================================================================
+  // LISTA DE ATIVIDADES
+  // =============================================================================
+  @override
+  Widget build(BuildContext context) {
+    if (_carregando) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Atividades"),
+        actions: [
+          if (_ehProfessor)
+            IconButton(
+              icon: const Icon(Icons.add),
+              onPressed: () => _openDialog(),
+            )
+        ],
+      ),
+      body: Column(
+        children: [
+          _filtros(),
+          Expanded(
+            child: StreamBuilder(
+              stream: _stream(),
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(child: Text("Erro: ${snap.error}"));
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                List<Map<String, dynamic>> lista =
+                    snap.data!.docs.map((d) => d.data()).toList();
+
+                // FILTRO TURMA
+                if (_turmaSelecionada != null) {
+                  lista = lista
+                      .where((a) => a["turmaId"] == _turmaSelecionada)
+                      .toList();
+                }
+
+                // FILTRO DISCIPLINA
+                if (_disciplinaSelecionada != null) {
+                  lista = lista
+                      .where((a) => a["disciplinaId"] == _disciplinaSelecionada)
+                      .toList();
+                }
+
+                // BUSCA
+                if (_buscaCtrl.text.isNotEmpty) {
+                  final q = _buscaCtrl.text.toLowerCase().trim();
+                  lista = lista
+                      .where((a) =>
+                          a["titulo"].toLowerCase().contains(q) ||
+                          a["descricao"].toLowerCase().contains(q))
+                      .toList();
+                }
+
+                // ORDENAR
+                lista.sort((a, b) =>
+                    (b["criadoEmMs"] ?? 0).compareTo(a["criadoEmMs"] ?? 0));
+
+                if (lista.isEmpty) {
+                  return const Center(child: Text("Nenhuma atividade encontrada"));
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: lista.length,
+                  itemBuilder: (_, i) {
+                    final atv = lista[i];
+                    final anexos = List<Map<String, dynamic>>.from(
+                        atv["anexos"] ?? []);
+
+                    return Card(
+                      child: ListTile(
+                        onTap: () {
+                          if (_ehProfessor) {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    AtividadeProfessorDetalhePage(
+                                  atividade: atv,
+                                ),
+                              ),
+                            );
+                          } else {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => AtividadeDetalhePage(
+                                  atividade: atv,
+                                  entrega: null,
+                                  ra: _auth.currentUser!.uid,
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                        title: Text(
+                          atv["titulo"],
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 17),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(atv["descricao"]),
+                            Text("Disciplina: ${_mapDiscNome[atv["disciplinaId"]] ?? ""}"),
+                            Text("Turma: ${_mapTurmaNome[atv["turmaId"]] ?? ""}"),
+                            Text("Bimestre: ${atv["bimestre"]}"),
+                            if (anexos.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              const Text("Anexos:",
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold)),
+                              ...anexos.map((a) => InkWell(
+                                    onTap: () => _abrirURL(a["url"]),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(4),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.attach_file),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                              child: Text(a["nome"],
+                                                  overflow:
+                                                      TextOverflow.ellipsis)),
+                                        ],
+                                      ),
+                                    ),
+                                  )),
+                            ],
+                          ],
+                        ),
+                        trailing: _ehProfessor
+                            ? PopupMenuButton(
+                                onSelected: (v) {
+                                  if (v == "edit") {
+                                    _openDialog(id: atv["id"], dados: atv);
+                                  } else if (v == "delete") {
+                                    _excluir(atv["id"]);
+                                  } else if (v == "entregas") {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => AtividadeEntregasPage(
+                                          atividadeId: atv["id"],
+                                          atividade: atv,
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                    value: "edit",
+                                    child: Text("Editar"),
+                                  ),
+                                  PopupMenuItem(
+                                    value: "entregas",
+                                    child: Text("Ver Entregas"),
+                                  ),
+                                  PopupMenuItem(
+                                    value: "delete",
+                                    child: Text("Excluir"),
+                                  ),
+                                ],
+                              )
+                            : null,
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =============================================================================
+  // FILTROS VISUAIS
+  // =============================================================================
+  Widget _filtros() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      color: Colors.grey.shade100,
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          SizedBox(
+            width: 220,
+            child: DropdownButtonFormField<String>(
+              value: _turmaSelecionada,
+              items: _turmas
+                  .map<DropdownMenuItem<String>>(
+                    (t) => DropdownMenuItem<String>(
+                      value: t["id"].toString(),
+                      child: Text(t["nome"].toString()),
+                    ),
+                  )
+                  .toList(),
+              decoration: const InputDecoration(
+                labelText: "Turma",
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() => _turmaSelecionada = v),
+            ),
+          ),
+          SizedBox(
+            width: 220,
+            child: DropdownButtonFormField<String>(
+              value: _disciplinaSelecionada,
+              items: _disciplinas
+                  .map<DropdownMenuItem<String>>(
+                    (d) => DropdownMenuItem<String>(
+                      value: d["id"].toString(),
+                      child: Text(d["nome"].toString()),
+                    ),
+                  )
+                  .toList(),
+              decoration: const InputDecoration(
+                labelText: "Disciplina",
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() => _disciplinaSelecionada = v),
+            ),
+          ),
+          SizedBox(
+            width: 260,
+            child: TextField(
+              controller: _buscaCtrl,
+              decoration: const InputDecoration(
+                labelText: "Buscar",
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() {}),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =============================================================================
+  // ABRIR URL
+  // =============================================================================
+  Future<void> _abrirURL(String url) async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+}

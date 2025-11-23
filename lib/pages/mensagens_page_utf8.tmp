@@ -1,0 +1,494 @@
+﻿// ✅ MENSAGENS_PAGE.DART — Compatível com banco e rules atuais
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+class MensagensPage extends StatefulWidget {
+  const MensagensPage({super.key});
+
+  @override
+  State<MensagensPage> createState() => _MensagensPageState();
+}
+
+class _MensagensPageState extends State<MensagensPage> {
+  final User? currentUser = FirebaseAuth.instance.currentUser;
+  final TextEditingController _mensagemController = TextEditingController();
+
+  String? _modoEnvio; // turma | aluno
+  String? _turmaSelecionada;
+  String? _alunoSelecionado; // UID ou RA do aluno
+  bool _isSending = false;
+  bool _ehProfessor = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _verificarTipoUsuario();
+  }
+
+  Future<void> _verificarTipoUsuario() async {
+    if (currentUser == null) return;
+    final snap = await FirebaseFirestore.instance
+        .collection("users")
+        .doc(currentUser!.uid)
+        .get();
+
+    final tipo = snap.data()?["role"] ?? snap.data()?["tipo"] ?? "aluno";
+    setState(() => _ehProfessor = tipo == "professor");
+  }
+
+  @override
+  void dispose() {
+    _mensagemController.dispose();
+    super.dispose();
+  }
+
+  // ============================================================
+  // ✅ INTERFACE PRINCIPAL
+  // ============================================================
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Mensagens"),
+        backgroundColor: Colors.white,
+        elevation: 1,
+        foregroundColor: Colors.black87,
+      ),
+      backgroundColor: Colors.grey.shade100,
+      body: Column(
+        children: [
+          _ehProfessor ? _buildEnviarMensagemBox() : const SizedBox(),
+          Expanded(child: _buildChatArea()),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // ✅ ÁREA DE CHAT
+  // ============================================================
+  Widget _buildChatArea() {
+    if (_modoEnvio == null) return _buildThreadsList();
+
+    if (_modoEnvio == "turma" && _turmaSelecionada != null) {
+      return Column(
+        children: [
+          _chatHeader("Turma"),
+          Expanded(child: _buildChatStream("turma")),
+          _buildMessageInput(),
+        ],
+      );
+    }
+
+    if (_modoEnvio == "aluno" && _alunoSelecionado != null) {
+      return Column(
+        children: [
+          _chatHeader("Aluno"),
+          Expanded(child: _buildChatStream("aluno")),
+          _buildMessageInput(),
+        ],
+      );
+    }
+
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Text(
+          "Selecione um modo de envio (Turma ou Aluno).",
+          textAlign: TextAlign.center,
+        ),
+      ),
+    );
+  }
+
+  Widget _chatHeader(String tipo) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(bottom: BorderSide(color: Colors.grey.shade300))),
+      child: Text(
+        tipo == "turma"
+            ? "Chat da turma selecionada"
+            : "Chat com aluno selecionado",
+        style: const TextStyle(
+            fontWeight: FontWeight.bold, color: Colors.black54, fontSize: 15),
+      ),
+    );
+  }
+
+  // ============================================================
+  // ✅ THREADS EXISTENTES
+  // ============================================================
+  Widget _buildThreadsList() {
+    final db = FirebaseFirestore.instance;
+    final uid = currentUser!.uid;
+
+    final stream = _ehProfessor
+        ? db
+            .collection("threads")
+            .where("professorId", isEqualTo: uid)
+            .orderBy("updatedAt", descending: true)
+            .snapshots()
+        : db
+            .collection("threads")
+            .where("participantes", arrayContains: uid)
+            .orderBy("updatedAt", descending: true)
+            .snapshots();
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: stream,
+      builder: (context, snap) {
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final docs = snap.data!.docs;
+        if (docs.isEmpty) {
+          return const Center(
+              child: Text("Nenhuma conversa ainda.",
+                  style: TextStyle(color: Colors.black54)));
+        }
+
+        return ListView.builder(
+          itemCount: docs.length,
+          itemBuilder: (context, i) {
+            final d = docs[i].data() as Map<String, dynamic>;
+            final ultima = d["lastMessage"] ?? "";
+            final atualizado = (d["updatedAt"] as Timestamp?)?.toDate();
+            final hora = atualizado != null
+                ? "${atualizado.day.toString().padLeft(2, '0')}/${atualizado.month.toString().padLeft(2, '0')}"
+                : "";
+
+            return ListTile(
+              onTap: () {
+                setState(() {
+                  _modoEnvio = "aluno";
+                  _alunoSelecionado = d["alunoRa"];
+                });
+              },
+              leading: const CircleAvatar(
+                backgroundColor: Colors.orange,
+                child: Icon(Icons.person, color: Colors.white),
+              ),
+              title: Text("Aluno RA: ${d["alunoRa"] ?? 'Desconhecido'}"),
+              subtitle:
+                  Text(ultima, maxLines: 1, overflow: TextOverflow.ellipsis),
+              trailing: Text(hora, style: const TextStyle(fontSize: 12)),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // ✅ STREAM DE MENSAGENS
+  // ============================================================
+  Widget _buildChatStream(String tipo) {
+    final db = FirebaseFirestore.instance;
+    Stream<QuerySnapshot<Map<String, dynamic>>> stream;
+
+    if (tipo == "turma") {
+      stream = db
+          .collection("turmas")
+          .doc(_turmaSelecionada)
+          .collection("mensagens")
+          .orderBy("data", descending: true)
+          .snapshots();
+    } else {
+      final key = _chatKey(currentUser!.uid, _alunoSelecionado!);
+      stream = db
+          .collection("threads")
+          .doc(key)
+          .collection("itens")
+          .orderBy("createdAt", descending: true)
+          .snapshots();
+    }
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snap) {
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final msgs = snap.data!.docs;
+        if (msgs.isEmpty) {
+          return const Center(
+            child: Text("Nenhuma mensagem ainda.",
+                style: TextStyle(color: Colors.black54)),
+          );
+        }
+
+        return ListView.builder(
+          reverse: true,
+          itemCount: msgs.length,
+          itemBuilder: (context, index) {
+            final msg = msgs[index].data();
+            final texto = msg["mensagem"] ?? msg["texto"] ?? "";
+            final autorUid = msg["autorUid"] ?? msg["fromUid"];
+            final autorNome = msg["autorNome"] ?? "Usuário";
+            final enviadoPorMim = autorUid == currentUser!.uid;
+
+            DateTime? data;
+            if (msg["data"] is Timestamp) {
+              data = (msg["data"] as Timestamp).toDate();
+            } else if (msg["createdAt"] is Timestamp) {
+              data = (msg["createdAt"] as Timestamp).toDate();
+            }
+
+            final hora = data != null
+                ? "${data.hour.toString().padLeft(2, '0')}:${data.minute.toString().padLeft(2, '0')}"
+                : "";
+
+            return Align(
+              alignment:
+                  enviadoPorMim ? Alignment.centerRight : Alignment.centerLeft,
+              child: Container(
+                margin:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: enviadoPorMim
+                      ? Colors.blue.shade100
+                      : Colors.grey.shade300,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(12),
+                    topRight: const Radius.circular(12),
+                    bottomLeft:
+                        enviadoPorMim ? const Radius.circular(12) : Radius.zero,
+                    bottomRight:
+                        enviadoPorMim ? Radius.zero : const Radius.circular(12),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (!enviadoPorMim)
+                      Text(autorNome,
+                          style: const TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w600)),
+                    Text(texto, style: const TextStyle(fontSize: 15)),
+                    const SizedBox(height: 4),
+                    Text(hora,
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.black54)),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // ✅ ENTRADA DE MENSAGEM
+  // ============================================================
+  Widget _buildMessageInput() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _mensagemController,
+                decoration: InputDecoration(
+                  hintText: "Digite sua mensagem...",
+                  filled: true,
+                  fillColor: Colors.white,
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 14),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(20),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: _isSending
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.send, color: Colors.blue),
+              onPressed: _isSending ? null : _enviarMensagem,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // ✅ ENVIO DE MENSAGENS
+  // ============================================================
+  Future<void> _enviarMensagem() async {
+    final texto = _mensagemController.text.trim();
+    if (texto.isEmpty) return;
+
+    setState(() => _isSending = true);
+    final db = FirebaseFirestore.instance;
+    final uid = currentUser!.uid;
+
+    try {
+      if (_modoEnvio == "turma") {
+        await db
+            .collection("turmas")
+            .doc(_turmaSelecionada!)
+            .collection("mensagens")
+            .add({
+          "autorUid": uid,
+          "autorNome": currentUser!.displayName ?? "Professor",
+          "mensagem": texto,
+          "tipo": "turma",
+          "data": FieldValue.serverTimestamp(),
+        });
+      } else if (_modoEnvio == "aluno") {
+        final key = _chatKey(uid, _alunoSelecionado!);
+
+        await db.collection("threads").doc(key).set({
+          "professorId": _ehProfessor ? uid : null,
+          "alunoRa": _alunoSelecionado,
+          "participantes": [uid, _alunoSelecionado],
+          "aberto": true,
+          "lastMessage": texto,
+          "updatedAt": FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        await db
+            .collection("threads")
+            .doc(key)
+            .collection("itens")
+            .add({
+          "fromUid": uid,
+          "toUid": _alunoSelecionado,
+          "texto": texto,
+          "createdAt": FieldValue.serverTimestamp(),
+        });
+      }
+
+      _mensagemController.clear();
+    } finally {
+      setState(() => _isSending = false);
+    }
+  }
+
+  // ============================================================
+  // ✅ SELEÇÃO DE DESTINO
+  // ============================================================
+  Widget _buildEnviarMensagemBox() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        children: [
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              value: _modoEnvio,
+              hint: const Text("Modo de envio"),
+              items: const [
+                DropdownMenuItem(value: "turma", child: Text("Turma")),
+                DropdownMenuItem(value: "aluno", child: Text("Aluno")),
+              ],
+              onChanged: (v) {
+                setState(() {
+                  _modoEnvio = v;
+                  _turmaSelecionada = null;
+                  _alunoSelecionado = null;
+                });
+              },
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (_modoEnvio != null)
+            Expanded(child: _buildDestinoSelector(_modoEnvio!)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDestinoSelector(String modo) {
+    if (modo == "turma") {
+      return StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection("turmas")
+            .where("professorId", isEqualTo: currentUser?.uid)
+            .snapshots(),
+        builder: (context, snap) {
+          final turmas = snap.data?.docs ?? [];
+          return DropdownButtonFormField<String>(
+            value: _turmaSelecionada,
+            hint: const Text("Selecione a turma"),
+            decoration: _inputDecoration(),
+            items: turmas
+                .map((t) => DropdownMenuItem<String>(
+                      value: t.id,
+                      child: Text(t["nome"] ?? t.id),
+                    ))
+                .toList(),
+            onChanged: (v) => setState(() => _turmaSelecionada = v),
+          );
+        },
+      );
+    }
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection("users")
+          .where("role", isEqualTo: "aluno")
+          .snapshots(),
+      builder: (context, snap) {
+        final alunos = snap.data?.docs ?? [];
+        return DropdownButtonFormField<String>(
+          value: _alunoSelecionado,
+          hint: const Text("Selecione o aluno"),
+          decoration: _inputDecoration(),
+          items: alunos
+              .map((a) => DropdownMenuItem<String>(
+                    value: a.id,
+                    child: Text(
+                        "${a["nome"] ?? "Sem nome"} • RA ${a["ra"] ?? "?"}"),
+                  ))
+              .toList(),
+          onChanged: (v) => setState(() => _alunoSelecionado = v),
+        );
+      },
+    );
+  }
+
+  InputDecoration _inputDecoration() => InputDecoration(
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+      );
+
+  // ============================================================
+  // ✅ CHAT KEY (prof + aluno)
+  // ============================================================
+  String _chatKey(String uidProf, String uidAluno) {
+    return (uidProf.compareTo(uidAluno) <= 0)
+        ? "${uidProf}_$uidAluno"
+        : "${uidAluno}_$uidProf";
+  }
+}
