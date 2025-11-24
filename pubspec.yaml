@@ -41,7 +41,7 @@ dependencies:
   another_flushbar: ^1.12.30
   animations: ^2.0.11
   google_fonts: ^6.2.1
-  dynamic_color: ^1.6.
+  dynamic_color: ^1.6.6
 
   # -------------------------
   # 📊 Exportação e relatórios
