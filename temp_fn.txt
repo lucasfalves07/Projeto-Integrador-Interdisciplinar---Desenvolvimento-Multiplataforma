@@ -23,7 +23,7 @@
         'fromUid': _alunoUid,
         'toUid': profUid,
         'createdAt': FieldValue.serverTimestamp(),
-      });
+      })
 
       _msgPrivadaCtrl.clear();
     } catch (e) {
