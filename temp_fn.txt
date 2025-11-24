@@ -19,7 +19,7 @@
       }, SetOptions(merge: true));
 
       await threadRef.collection('itens').add({ // âœ… troca para 'itens'
-        'texto': texto
+        'texto': texto;
         'fromUid': _alunoUid,
         'toUid': profUid,
         'createdAt': FieldValue.serverTimestamp(),
