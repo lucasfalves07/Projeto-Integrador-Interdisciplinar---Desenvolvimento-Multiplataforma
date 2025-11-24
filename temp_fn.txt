@@ -3,7 +3,7 @@
     if (texto.isEmpty || _profSelecionado == null) return;
 
     final profUid = _profSelecionado!;
-    // key removido (usamos thread aleat�ria)
+    // key removido (usamos thread aleatória)
 
     try {
       final threadRef =
@@ -18,7 +18,7 @@
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      await threadRef.collection('itens').add({ // ✅ troca para 'itens'
+      await threadRef.collection('itens').add({ // âœ… troca para 'itens
         'texto': texto,
         'fromUid': _alunoUid,
         'toUid': profUid,
