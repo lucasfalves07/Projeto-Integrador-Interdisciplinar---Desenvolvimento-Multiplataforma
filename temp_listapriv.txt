@@ -1,14 +1,14 @@
   Widget _listaMensagensPrivadas(String profUid) {
     final q = _buscaCtrl.text.trim().toLowerCase();
-    // key removido (usamos thread aleat�ria)
+    // key removido (usamos thread aleatória)
 
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
           .collection('threads')
           .doc(key)
-          .collection('itens') // ✅ troca para 'itens'
+          .collection('itens') // âœ… troca para 'itens'
           .orderBy('createdAt', descending: false)
-          .snapshots(),
+          .snapshots()
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
