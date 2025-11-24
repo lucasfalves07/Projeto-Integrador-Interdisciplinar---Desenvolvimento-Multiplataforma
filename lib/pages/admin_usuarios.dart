@@ -4,6 +4,13 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:poliedro_flutter/services/firestore_service.dart';
 import 'package:poliedro_flutter/services/auth_service.dart';
 
+
+
+
+// pagina de admin para usuarios
+
+
+
 class AdminUsuariosPage extends StatefulWidget {
   const AdminUsuariosPage({super.key});
 
