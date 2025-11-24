@@ -5,7 +5,7 @@
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
           .collection('threads')
-          .doc(key)
+          .doc(key
           .collection('itens') // âœ… troca para 'itens'
           .orderBy('createdAt', descending: false)
           .snapshots();
