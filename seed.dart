@@ -226,7 +226,7 @@ Future<void> main() async {
           "disciplinaId": disc.id,
           "turmaId": turmaId,
           "peso": atv["peso"],
-          "max": atv["max"],
+          "max": atv["max"]
           "titulo": atv["titulo"],
           "data": FieldValue.serverTimestamp(),
         });
