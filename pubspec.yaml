@@ -65,7 +65,7 @@ dev_dependencies:
   glob: ^2.1.2
 
 flutter:
-  uses-material-design: true
+  uses-material-design: tru
 
   assets:
     - assets/poliedro-logo.png
