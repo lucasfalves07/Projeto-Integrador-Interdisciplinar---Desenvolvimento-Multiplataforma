@@ -8,7 +8,7 @@
           .doc(key)
           .collection('itens') // âœ… troca para 'itens'
           .orderBy('createdAt', descending: false)
-          .snapshots()
+          .snapshots();
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
