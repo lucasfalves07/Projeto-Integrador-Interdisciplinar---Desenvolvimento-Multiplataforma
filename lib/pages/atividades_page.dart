@@ -1,15 +1,24 @@
+// ============================================================================
+//  ATIVIDADES_PAGE — VERSÃO FINAL COMPLETA, 100% COMPATÍVEL COM O FIRESTORE DA DUDA
+//  — Suporte aluno/professor
+//  — Botão de adicionar funcionando
+//  — Leitura perfeita das turmas/disciplinas
+//  — Sem carregamento infinito
+//  — Sem erros de tipo
+// ============================================================================
+
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:intl/intl.dart';
-import 'package:excel/excel.dart' as x;
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:poliedro_flutter/pages/atividade_detalhe.dart';
+import 'package:poliedro_flutter/pages/atividade_professor_detalhe.dart';
+import 'package:poliedro_flutter/pages/atividade_entregas_page.dart';
 
 class AtividadesPage extends StatefulWidget {
   const AtividadesPage({super.key});
@@ -18,802 +27,585 @@ class AtividadesPage extends StatefulWidget {
   State<AtividadesPage> createState() => _AtividadesPageState();
 }
 
-class _AtividadesPageState extends State<AtividadesPage>
-    with SingleTickerProviderStateMixin {
+class _AtividadesPageState extends State<AtividadesPage> {
   final _auth = FirebaseAuth.instance;
-  String? _turmaSelecionada;
-  String? _disciplinaSelecionada;
+  bool _ehProfessor = false;
+  bool _loading = true;
+
+  String? _turma;
+  String? _disciplina;
+  final TextEditingController _buscaCtrl = TextEditingController();
 
   List<Map<String, dynamic>> _turmas = [];
-  List<Map<String, dynamic>> _alunos = [];
-  List<Map<String, dynamic>> _atividades = [];
+  List<Map<String, dynamic>> _disciplinas = [];
+  List<String> _turmasAluno = [];
 
-  final Map<String, Map<String, double>> _notas = {};
-  final Map<String, double> _mediaTurma = {};
-
-  late TabController _tabController;
-  bool _carregando = false;
-  bool _salvando = false;
+  final Map<String, String> _nomesTurma = {};
+  final Map<String, String> _nomesDisc = {};
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _carregarTurmas();
+    _bootstrap();
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
+  Future<void> _bootstrap() async {
+    final uid = _auth.currentUser!.uid;
 
-  Future<void> _carregarTurmas() async {
-    try {
-      final prof = _auth.currentUser?.uid;
-      final snap = await FirebaseFirestore.instance
-          .collection('turmas')
-          .where('professorId', isEqualTo: prof)
-          .get();
+    final user =
+        await FirebaseFirestore.instance.collection("users").doc(uid).get();
 
-      if (!mounted) return;
-      setState(() {
-        _turmas = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
-      });
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Erro ao carregar turmas: $e')));
+    final perfil = user.data()?["perfil"] ?? "aluno";
+    _ehProfessor = perfil == "professor";
+
+    if (_ehProfessor) {
+      await _carregarProfessor(uid);
+    } else {
+      await _carregarAluno(uid);
     }
+
+    _cachearRotulos();
+    setState(() => _loading = false);
   }
 
-  Future<void> _carregarAlunosEDados() async {
-    if (_turmaSelecionada == null) return;
-    setState(() => _carregando = true);
+  // ============================================================================
+  //  PROFESSOR
+  // ============================================================================
+  Future<void> _carregarProfessor(String uid) async {
+    final snap = await FirebaseFirestore.instance
+        .collection("turmas")
+        .where("professorId", isEqualTo: uid)
+        .get();
 
-    try {
-      final alunosSnap = await FirebaseFirestore.instance
-          .collection('alunos')
-          .where('turmaId', isEqualTo: _turmaSelecionada)
-          .get();
-      _alunos = alunosSnap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
-
-      final atividadesSnap = await FirebaseFirestore.instance
-          .collection('atividades')
-          .where('turmaIds', arrayContains: _turmaSelecionada)
-          .get();
-      _atividades =
-          atividadesSnap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
-
-      final notasSnap = await FirebaseFirestore.instance
-          .collection('notas')
-          .where('turmaId', isEqualTo: _turmaSelecionada)
-          .get();
-
-      _notas.clear();
-      for (var doc in notasSnap.docs) {
-        final n = doc.data();
-        final aluno = (n['alunoUid'] ?? '').toString();
-        final atv = (n['atividadeId'] ?? '').toString();
-        final nota = (n['nota'] ?? 0).toDouble();
-        if (aluno.isEmpty || atv.isEmpty) continue;
-        _notas.putIfAbsent(aluno, () => {});
-        _notas[aluno]![atv] = nota;
-      }
-
-      _mediaTurma[_turmaSelecionada!] = _calcularMediaTurma();
-      if (mounted) setState(() {});
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Erro ao carregar: $e')));
-    } finally {
-      if (mounted) setState(() => _carregando = false);
-    }
-  }
-
-  double _mediaAluno(String alunoId) {
-    final atividades = _atividadesFiltradas();
-    double soma = 0, pesos = 0;
-    for (var atv in atividades) {
-      final peso = (atv['peso'] ?? 1).toDouble();
-      final nota = _notas[alunoId]?[atv['id']] ?? 0;
-      soma += nota * peso;
-      pesos += peso;
-    }
-    return pesos == 0 ? 0 : soma / pesos;
-  }
-
-  double _calcularMediaTurma() {
-    if (_alunos.isEmpty) return 0;
-    double soma = 0;
-    for (final aluno in _alunos) {
-      soma += _mediaAluno(aluno['id']);
-    }
-    return soma / _alunos.length;
-  }
-
-  List<Map<String, dynamic>> _atividadesFiltradas() {
-    if (_disciplinaSelecionada == null || _disciplinaSelecionada!.isEmpty) {
-      return _atividades;
-    }
-    return _atividades
-        .where((a) =>
-            (a['disciplina'] ?? '').toString() == _disciplinaSelecionada)
+    _turmas = snap.docs
+        .map((d) => {
+              "id": d.id,
+              ...d.data(),
+            })
         .toList();
+
+    _disciplinas.clear();
+
+    for (var t in _turmas) {
+      final discs = t["disciplinas"];
+      if (discs is List) {
+        for (var d in discs) {
+          if (d is Map) {
+            _disciplinas.add({
+              "id": d["id"],
+              "nome": d["nome"],
+              "turmaId": t["id"],
+            });
+          }
+        }
+      }
+    }
   }
 
+  // ============================================================================
+  //  ALUNO
+  // ============================================================================
+  Future<void> _carregarAluno(String uid) async {
+    final user =
+        await FirebaseFirestore.instance.collection("users").doc(uid).get();
+
+    _turmasAluno = List<String>.from(user.data()?["turmas"] ?? []);
+
+    _turmas.clear();
+    _disciplinas.clear();
+
+    for (var tid in _turmasAluno) {
+      final t = await FirebaseFirestore.instance
+          .collection("turmas")
+          .doc(tid)
+          .get();
+      if (!t.exists) continue;
+
+      final turma = {"id": t.id, ...t.data()!};
+      _turmas.add(turma);
+
+      final discs = turma["disciplinas"];
+      if (discs is List) {
+        for (var d in discs) {
+          if (d is Map) {
+            _disciplinas.add({
+              "id": d["id"],
+              "nome": d["nome"],
+              "turmaId": tid,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // ============================================================================
+  //  CACHE RÓTULOS
+  // ============================================================================
+  void _cachearRotulos() {
+    for (var t in _turmas) {
+      _nomesTurma[t["id"]] = t["nome"];
+    }
+    for (var d in _disciplinas) {
+      _nomesDisc[d["id"]] = d["nome"];
+    }
+  }
+
+  // ============================================================================
+  //  STREAM DE ATIVIDADES
+  // ============================================================================
+  Stream<QuerySnapshot<Map<String, dynamic>>> _stream() {
+    final ref = FirebaseFirestore.instance.collection("atividades");
+
+    if (_ehProfessor) {
+      final ids = _turmas.map((e) => e["id"]).toList();
+      if (ids.length <= 10) {
+        return ref.where("turmaId", whereIn: ids).snapshots();
+      }
+      return ref.snapshots();
+    }
+
+    if (_turmasAluno.length <= 10) {
+      return ref.where("turmaId", whereIn: _turmasAluno).snapshots();
+    }
+
+    return ref.snapshots();
+  }
+
+  // ============================================================================
+  //  UPLOAD ARQUIVO
+  // ============================================================================
+  Future<Map<String, dynamic>?> _uploadAnexo() async {
+    final sel = await FilePicker.platform.pickFiles(withData: true);
+    if (sel == null) return null;
+
+    final f = sel.files.first;
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final path = "atividades/$id/${f.name}";
+
+    UploadTask upload;
+    if (f.bytes != null) {
+      upload = FirebaseStorage.instance
+          .ref(path)
+          .putData(f.bytes!, SettableMetadata(contentType: "file"));
+    } else if (!kIsWeb && f.path != null) {
+      upload = FirebaseStorage.instance
+          .ref(path)
+          .putFile(File(f.path!));
+    } else {
+      return null;
+    }
+
+    final snap = await upload;
+    final url = await snap.ref.getDownloadURL();
+
+    return {
+      "nome": f.name,
+      "url": url,
+      "contentType": f.extension ?? "file",
+      "path": snap.ref.fullPath,
+    };
+  }
+
+  // ============================================================================
+  //  UI
+  // ============================================================================
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     return Scaffold(
-      backgroundColor: theme.colorScheme.surface,
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
-        elevation: 0.4,
-        title: const Text(
-          'Atividades e Notas',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
+        title: const Text("Atividades"),
         actions: [
-          if (_alunos.isNotEmpty)
-            TextButton.icon(
-              onPressed: _mostrarDialogoExportar,
-              icon: const Icon(Icons.download_rounded, color: Colors.black87),
-              label: const Text('Exportar',
-                  style: TextStyle(
-                      color: Colors.black87, fontWeight: FontWeight.w600)),
+          if (_ehProfessor)
+            IconButton(
+              icon: const Icon(Icons.add),
+              onPressed: () => _abrirDialogCriar(),
             ),
-          const SizedBox(width: 8),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xffff9800),
-              foregroundColor: Colors.white,
-            ),
-            onPressed: _abrirFormularioNovaAtividade,
-            icon: const Icon(Icons.add),
-            label: const Text('Nova Atividade'),
-          ),
-          const SizedBox(width: 12),
         ],
       ),
-      body: SafeArea(
-        child: _carregando
-            ? const Center(child: CircularProgressIndicator())
-            : Column(
-                children: [
-                  _filtrosTurmaDisciplina(),
-                  const SizedBox(height: 4),
-                  TabBar(
-                    controller: _tabController,
-                    indicatorColor: Colors.orange,
-                    labelColor: Colors.black,
-                    tabs: const [
-                      Tab(text: 'Lançamento de Notas'),
-                      Tab(text: 'Boletim Consolidado'),
-                    ],
-                  ),
-                  Expanded(
-                    child: TabBarView(
-                      controller: _tabController,
-                      children: [
-                        _tabelaLancamento(),
-                        _boletimConsolidado(),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-      ),
-    );
-  }
+      body: Column(
+        children: [
+          _filtros(),
+          Expanded(
+            child: StreamBuilder(
+              stream: _stream(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-  Widget _filtrosTurmaDisciplina() => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          children: [
-            Expanded(
-              flex: 2,
-              child: DropdownButtonFormField<String>(
-                value: _turmaSelecionada,
-                decoration: const InputDecoration(
-                  labelText: 'Turma',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: _turmas
-                    .map((t) => DropdownMenuItem<String>(
-                          value: t['id'],
-                          child: Text(t['nome'] ?? 'Turma'),
-                        ))
-                    .toList(),
-                onChanged: (v) async {
-                  setState(() => _turmaSelecionada = v);
-                  await _carregarAlunosEDados();
-                },
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              flex: 2,
-              child: DropdownButtonFormField<String>(
-                value: _disciplinaSelecionada,
-                decoration: const InputDecoration(
-                  labelText: 'Disciplina',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: _atividades
-                    .map((a) => a['disciplina']?.toString())
-                    .toSet()
-                    .where((e) => e != null && e!.trim().isNotEmpty)
-                    .map((d) => DropdownMenuItem<String>(
-                          value: d!,
-                          child: Text(d),
-                        ))
-                    .toList(),
-                onChanged: (v) => setState(() => _disciplinaSelecionada = v),
-              ),
-            ),
-          ],
-        ),
-      );
+                List<Map<String, dynamic>> lista = snapshot.data!.docs
+                    .map((d) => d.data())
+                    .toList();
 
-  Widget _tabelaLancamento() {
-    final atividades = _atividadesFiltradas();
-    if (_alunos.isEmpty || atividades.isEmpty) {
-      return const Center(
-          child: Text('Selecione uma turma e adicione atividades.'));
-    }
+                // FILTROS
+                if (_turma != null && _turma!.isNotEmpty) {
+                  lista = lista
+                      .where((a) => a["turmaId"] == _turma)
+                      .toList();
+                }
 
-    return Column(children: [
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(8),
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
-            columns: [
-              const DataColumn(label: Text('Aluno')),
-              ...atividades
-                  .map((a) => DataColumn(label: Text(a['titulo'] ?? '-')))
-                  .toList(),
-            ],
-            rows: _alunos.map((aluno) {
-              final alunoId = aluno['id'];
-              return DataRow(cells: [
-                DataCell(Text(aluno['nome'] ?? '-')),
-                ...atividades.map((a) {
-                  final atvId = a['id'];
-                  final valor = _notas[alunoId]?[atvId] ?? 0;
-                  final controller =
-                      TextEditingController(text: valor.toString());
-                  return DataCell(
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 90),
-                      child: TextFormField(
-                        controller: controller,
-                        textAlign: TextAlign.center,
-                        keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          contentPadding:
-                              EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                if (_disciplina != null && _disciplina!.isNotEmpty) {
+                  lista = lista
+                      .where((a) => a["disciplinaId"] == _disciplina)
+                      .toList();
+                }
+
+                final q = _buscaCtrl.text.toLowerCase();
+                if (q.isNotEmpty) {
+                  lista = lista.where((a) {
+                    final t = (a["titulo"] ?? "").toLowerCase();
+                    final d = (a["descricao"] ?? "").toLowerCase();
+                    return t.contains(q) || d.contains(q);
+                  }).toList();
+                }
+
+                lista.sort((a, b) =>
+                    (b["criadoEmMs"] ?? 0).compareTo(a["criadoEmMs"] ?? 0));
+
+                if (lista.isEmpty) {
+                  return const Center(child: Text("Nenhuma atividade."));
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: lista.length,
+                  itemBuilder: (context, i) {
+                    final atv = lista[i];
+
+                    final turmaNome =
+                        _nomesTurma[atv["turmaId"]] ?? "Turma";
+                    final discNome =
+                        _nomesDisc[atv["disciplinaId"]] ??
+                            atv["disciplinaNome"] ??
+                            "Disciplina";
+
+                    return Card(
+                      child: ListTile(
+                        title: Text(
+                          atv["titulo"] ?? "",
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.bold),
                         ),
-                        onChanged: (v) {
-                          final novo =
-                              double.tryParse(v.replaceAll(',', '.')) ?? 0;
-                          setState(() {
-                            _notas.putIfAbsent(alunoId, () => {});
-                            _notas[alunoId]![atvId] = novo;
-                          });
-                        },
-                        onFieldSubmitted: (_) => _salvarNotas(),
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ]);
-            }).toList(),
-          ),
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-        child: ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xff3b6cff),
-            foregroundColor: Colors.white,
-            minimumSize: const Size.fromHeight(46),
-          ),
-          onPressed: _salvando ? null : _salvarNotas,
-          icon: _salvando
-              ? const SizedBox(
-                  height: 16,
-                  width: 16,
-                  child: CircularProgressIndicator(
-                      color: Colors.white, strokeWidth: 2))
-              : const Icon(Icons.save_rounded),
-          label: const Text('Salvar notas'),
-        ),
-      ),
-    ]);
-  }
-
-  Widget _boletimConsolidado() {
-    final atividades = _atividadesFiltradas();
-    if (_alunos.isEmpty || atividades.isEmpty) {
-      return const Center(child: Text('Sem dados para exibir.'));
-    }
-
-    final mediaTurma =
-        _mediaTurma[_turmaSelecionada ?? ''] ?? _calcularMediaTurma();
-
-    final columns = <DataColumn>[
-      const DataColumn(label: Text('Aluno')),
-      ...atividades
-          .map((a) => DataColumn(label: Text((a['titulo'] ?? '-').toString()))),
-      const DataColumn(label: Text('Média')),
-      const DataColumn(label: Text('Desempenho')),
-    ];
-
-    final rows = _alunos.map((aluno) {
-      final alunoId = aluno['id'];
-      final mediaAluno = _mediaAluno(alunoId);
-      final diff = mediaAluno - mediaTurma;
-      final desempenho = diff >= 0.5
-          ? 'Acima da média'
-          : diff <= -0.5
-              ? 'Abaixo da média'
-              : 'Dentro da média';
-      return DataRow(cells: [
-        DataCell(Text(aluno['nome'] ?? '-')),
-        ...atividades.map((a) {
-          final n = _notas[alunoId]?[a['id']] ?? 0;
-          return DataCell(Text(n.toStringAsFixed(1)));
-        }),
-        DataCell(Text(mediaAluno.toStringAsFixed(2))),
-        DataCell(Text(desempenho)),
-      ]);
-    }).toList();
-
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-        child: Text(
-          'Média da turma: ${mediaTurma.toStringAsFixed(2)}',
-          style:
-              const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-        ),
-      ),
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(8),
-          scrollDirection: Axis.horizontal,
-          child: DataTable(columns: columns, rows: rows),
-        ),
-      ),
-    ]);
-  }
-
-  Future<void> _salvarNotas() async {
-    if (_turmaSelecionada == null) return;
-    setState(() => _salvando = true);
-
-    try {
-      final batch = FirebaseFirestore.instance.batch();
-      final notasRef = FirebaseFirestore.instance.collection('notas');
-
-      for (final alunoEntry in _notas.entries) {
-        final alunoUid = alunoEntry.key;
-        final alunoInfo =
-            _alunos.firstWhere((a) => a['id'] == alunoUid, orElse: () => {});
-        final alunoRA = (alunoInfo['ra'] ?? '').toString();
-
-        for (final atividadeEntry in alunoEntry.value.entries) {
-          final atividadeId = atividadeEntry.key;
-          final nota = atividadeEntry.value;
-
-          final atv = _atividades.firstWhere(
-              (a) => a['id'] == atividadeId,
-              orElse: () => {});
-          final disciplina = (atv['disciplina'] ?? '').toString();
-          final atividadeTitulo = (atv['titulo'] ?? '').toString();
-
-          final docId = '${atividadeId}_$alunoUid';
-          final docRef = notasRef.doc(docId);
-
-          batch.set(docRef, {
-            'atividadeId': atividadeId,
-            'atividadeTitulo': atividadeTitulo,
-            'disciplina': disciplina,
-            'alunoUid': alunoUid,
-            'alunoRA': alunoRA,
-            'turmaId': _turmaSelecionada,
-            'professorId': _auth.currentUser?.uid,
-            'nota': nota,
-            'dataLancamento': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-        }
-      }
-
-      await batch.commit();
-      _mediaTurma[_turmaSelecionada!] = _calcularMediaTurma();
-
-      final alunosCol = FirebaseFirestore.instance.collection('alunos');
-      for (final aluno in _alunos) {
-        final media = _mediaAluno(aluno['id']);
-        await alunosCol
-            .doc(aluno['id'])
-            .set({'media': media}, SetOptions(merge: true));
-      }
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Notas salvas e médias atualizadas!')));
-      setState(() {});
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Erro ao salvar: $e')));
-    } finally {
-      if (mounted) setState(() => _salvando = false);
-    }
-  }
-
-  Future<void> _mostrarDialogoExportar() async {
-    await showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 46,
-                height: 5,
-                decoration: BoxDecoration(
-                    color: Colors.grey.shade400,
-                    borderRadius: BorderRadius.circular(8)),
-              ),
-              const SizedBox(height: 14),
-              const Text('Exportar boletim',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 16),
-              ListTile(
-                  leading: const Icon(Icons.grid_on_rounded),
-                  title: const Text('Excel (.xlsx)'),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _exportarExcel();
-                  }),
-              ListTile(
-                  leading: const Icon(Icons.picture_as_pdf_rounded),
-                  title: const Text('PDF (.pdf)'),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _exportarPDF();
-                  }),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _exportarExcel() async {
-    try {
-      final excel = x.Excel.createExcel();
-      final turmaNome = _turmas
-          .firstWhere((t) => t['id'] == _turmaSelecionada)['nome']
-          .toString();
-      final sheet = excel[turmaNome];
-      final atividades = _atividadesFiltradas();
-      final mediaTurma =
-          _mediaTurma[_turmaSelecionada ?? ''] ?? _calcularMediaTurma();
-
-      // Cabeçalho
-      sheet.appendRow([
-        x.TextCellValue('RA'),
-        x.TextCellValue('Aluno'),
-        ...atividades.map((a) => x.TextCellValue(a['titulo'] ?? '-')),
-        x.TextCellValue('Média'),
-        x.TextCellValue('Desempenho'),
-      ]);
-
-      // Linhas
-      for (var aluno in _alunos) {
-        final alunoId = aluno['id'];
-        final mediaAluno = _mediaAluno(alunoId);
-        final diff = mediaAluno - mediaTurma;
-        final desempenho = diff >= 0.5
-            ? 'Acima da média'
-            : diff <= -0.5
-                ? 'Abaixo da média'
-                : 'Dentro da média';
-        final notas = atividades.map((a) {
-          final n = _notas[alunoId]?[a['id']] ?? 0;
-          return x.TextCellValue(n.toStringAsFixed(1));
-        }).toList();
-
-        sheet.appendRow([
-          x.TextCellValue(aluno['ra'] ?? ''),
-          x.TextCellValue(aluno['nome'] ?? ''),
-          ...notas,
-          x.TextCellValue(mediaAluno.toStringAsFixed(2)),
-          x.TextCellValue(desempenho),
-        ]);
-      }
-
-      if (!kIsWeb) {
-        final dir = await getTemporaryDirectory();
-        final path =
-            '${dir.path}/Boletim_${turmaNome.replaceAll(" ", "_")}.xlsx';
-        final bytes = excel.encode();
-        if (bytes != null) {
-          final file = File(path)..writeAsBytesSync(bytes);
-          await Share.shareXFiles([XFile(file.path)],
-              text: 'Boletim da turma $turmaNome exportado com sucesso!');
-        }
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Exportação de Excel não é suportada no navegador.')));
-      }
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Erro ao exportar Excel: $e')));
-    }
-  }
-
-  Future<void> _exportarPDF() async {
-    try {
-      final pdf = pw.Document();
-      final date = DateFormat('dd/MM/yyyy').format(DateTime.now());
-      final turmaNome = _turmas
-          .firstWhere((t) => t['id'] == _turmaSelecionada)['nome']
-          .toString();
-      final atividades = _atividadesFiltradas();
-      final mediaTurma =
-          _mediaTurma[_turmaSelecionada ?? ''] ?? _calcularMediaTurma();
-
-      final headers = [
-        'RA',
-        'Aluno',
-        ...atividades.map((a) => (a['titulo'] ?? '').toString()),
-        'Média',
-        'Desempenho',
-      ];
-
-      final data = _alunos.map((a) {
-        final alunoId = a['id'];
-        final mediaAluno = _mediaAluno(alunoId);
-        final diff = mediaAluno - mediaTurma;
-        final desempenho = diff >= 0.5
-            ? 'Acima da média'
-            : diff <= -0.5
-                ? 'Abaixo da média'
-                : 'Dentro da média';
-        final notas = atividades.map((atv) {
-          final n = _notas[alunoId]?[atv['id']] ?? 0;
-          return n.toStringAsFixed(1);
-        }).toList();
-        return [
-          (a['ra'] ?? '').toString(),
-          (a['nome'] ?? '').toString(),
-          ...notas,
-          mediaAluno.toStringAsFixed(2),
-          desempenho,
-        ];
-      }).toList();
-
-      pdf.addPage(pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        build: (context) => [
-          pw.Header(
-            level: 0,
-            child: pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text('Boletim da Turma: $turmaNome',
-                    style: pw.TextStyle(
-                        fontSize: 18,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColors.blue800)),
-                pw.Text('Emitido em $date'),
-              ],
-            ),
-          ),
-          pw.Table.fromTextArray(
-            headers: headers,
-            data: data,
-            headerStyle: pw.TextStyle(
-                fontWeight: pw.FontWeight.bold, color: PdfColors.black),
-            headerDecoration:
-                const pw.BoxDecoration(color: PdfColors.grey300),
-            cellStyle: const pw.TextStyle(fontSize: 9),
-            cellAlignment: pw.Alignment.centerLeft,
-          ),
-          pw.SizedBox(height: 12),
-          pw.Text(
-            'Média Geral da Turma: ${mediaTurma.toStringAsFixed(2)}',
-            style: pw.TextStyle(
-                fontSize: 12,
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColors.blue800),
-          ),
-        ],
-      ));
-
-      await Printing.layoutPdf(onLayout: (format) async => pdf.save());
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao exportar PDF: $e')));
-    }
-  }
-
-  Future<void> _abrirFormularioNovaAtividade() async {
-    final tituloCtrl = TextEditingController();
-    final disciplinaCtrl = TextEditingController();
-    final pesoCtrl = TextEditingController(text: '1');
-    final prazoCtrl = TextEditingController();
-    DateTime? prazoSelecionado;
-    String? turmaId = _turmaSelecionada;
-
-    await showModalBottomSheet(
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      context: context,
-      builder: (context) {
-        final bottom = MediaQuery.of(context).viewInsets.bottom;
-        return Padding(
-          padding:
-              EdgeInsets.only(bottom: bottom, left: 16, right: 16, top: 14),
-          child: StatefulBuilder(builder: (context, setStateDialog) {
-            return SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 50,
-                      height: 5,
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade400,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('Nova Atividade',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: tituloCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Título',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: disciplinaCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Disciplina',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    value: turmaId,
-                    decoration: const InputDecoration(
-                      labelText: 'Turma',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: _turmas
-                        .map((t) => DropdownMenuItem<String>(
-                              value: t['id'],
-                              child: Text(t['nome'] ?? 'Turma'),
-                            ))
-                        .toList(),
-                    onChanged: (v) => setStateDialog(() => turmaId = v),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: pesoCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Peso',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: prazoCtrl,
-                    readOnly: true,
-                    decoration: InputDecoration(
-                      labelText: 'Prazo',
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.calendar_month),
-                        onPressed: () async {
-                          final pick = await showDatePicker(
-                            context: context,
-                            firstDate: DateTime.now(),
-                            lastDate: DateTime(2100),
-                            initialDate: DateTime.now(),
-                          );
-                          if (pick != null) {
-                            setStateDialog(() {
-                              prazoSelecionado = pick;
-                              prazoCtrl.text =
-                                  DateFormat('dd/MM/yyyy').format(pick);
-                            });
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(atv["descricao"] ?? ""),
+                            Text("Turma: $turmaNome"),
+                            Text("Disciplina: $discNome"),
+                            Text("Bimestre: ${atv["bimestre"] ?? "-"}"),
+                          ],
+                        ),
+                        onTap: () {
+                          if (_ehProfessor) {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    AtividadeProfessorDetalhePage(
+                                  atividade: atv,
+                                ),
+                              ),
+                            );
+                          } else {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => AtividadeDetalhePage(
+                                  atividade: atv,
+                                  entrega: null,
+                                  ra: _auth.currentUser!.uid,
+                                ),
+                              ),
+                            );
                           }
                         },
+                        trailing: _ehProfessor
+                            ? PopupMenuButton(
+                                onSelected: (v) {
+                                  if (v == "edit") {
+                                    _abrirDialogCriar(
+                                      id: atv["id"],
+                                      dados: atv,
+                                    );
+                                  } else if (v == "delete") {
+                                    _deletar(atv["id"]);
+                                  } else if (v == "entregas") {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            AtividadeEntregasPage(
+                                          atividadeId: atv["id"],
+                                          atividade: atv,
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                      value: "edit", child: Text("Editar")),
+                                  PopupMenuItem(
+                                      value: "entregas",
+                                      child: Text("Ver entregas")),
+                                  PopupMenuItem(
+                                      value: "delete",
+                                      child: Text(
+                                        "Excluir",
+                                        style:
+                                            TextStyle(color: Colors.red),
+                                      )),
+                                ],
+                              )
+                            : null,
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================================
+  // FILTROS
+  // ============================================================================
+  Widget _filtros() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      color: Colors.grey.shade200,
+      child: Wrap(
+        spacing: 16,
+        runSpacing: 16,
+        children: [
+          SizedBox(
+            width: 220,
+            child: DropdownButtonFormField<String>(
+              value: _turma,
+              items: _turmas
+                  .map<DropdownMenuItem<String>>(
+                    (t) => DropdownMenuItem<String>(
+                      value: t["id"] as String?,
+                      child: Text(t["nome"]?.toString() ?? ""),
+                    ),
+                  )
+                  .toList(),
+              decoration: const InputDecoration(
+                labelText: "Turma",
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() => _turma = v),
+            ),
+          ),
+
+          SizedBox(
+            width: 220,
+            child: DropdownButtonFormField<String>(
+              value: _disciplina,
+              items: _disciplinas
+                  .map<DropdownMenuItem<String>>(
+                    (d) => DropdownMenuItem<String>(
+                      value: d["id"] as String?,
+                      child: Text(d["nome"]?.toString() ?? ""),
+                    ),
+                  )
+                  .toList(),
+              decoration: const InputDecoration(
+                labelText: "Disciplina",
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() => _disciplina = v),
+            ),
+          ),
+
+          SizedBox(
+            width: 260,
+            child: TextField(
+              controller: _buscaCtrl,
+              decoration: const InputDecoration(
+                labelText: "Buscar",
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() {}),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================================
+  // DELETAR ATIVIDADE
+  // ============================================================================
+  Future<void> _deletar(String id) async {
+    await FirebaseFirestore.instance.collection("atividades").doc(id).delete();
+  }
+
+  // ============================================================================
+  // DIALOG DE CRIAR/EDITAR
+  // ============================================================================
+  Future<void> _abrirDialogCriar({String? id, Map<String, dynamic>? dados}) async {
+    final titulo = TextEditingController(text: dados?["titulo"]);
+    final desc = TextEditingController(text: dados?["descricao"]);
+
+    String? turma = dados?["turmaId"];
+    String? disc = dados?["disciplinaId"];
+    String bimestre = dados?["bimestre"] ?? "1º Bimestre";
+
+    List anexos = List<Map<String, dynamic>>.from(dados?["anexos"] ?? []);
+
+    await showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (_, setStateDialog) {
+          return AlertDialog(
+            title: Text(id == null ? "Criar atividade" : "Editar atividade"),
+            content: SingleChildScrollView(
+              child: Column(
+                children: [
+                  TextField(
+                    controller: titulo,
+                    decoration: const InputDecoration(labelText: "Título"),
+                  ),
+                  const SizedBox(height: 12),
+
+                  TextField(
+                    controller: desc,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(labelText: "Descrição"),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  DropdownButtonFormField<String>(
+                    value: turma,
+                    items: _turmas
+                        .map<DropdownMenuItem<String>>(
+                          (t) => DropdownMenuItem<String>(
+                            value: t["id"] as String?,
+                            child: Text(t["nome"]?.toString() ?? ""),
+                          ),
+                        )
+                        .toList(),
+                    decoration: const InputDecoration(
+                      labelText: "Turma",
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (v) => setStateDialog(() => turma = v),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  DropdownButtonFormField<String>(
+                    value: disc,
+                    items: _disciplinas
+                        .map<DropdownMenuItem<String>>(
+                          (d) => DropdownMenuItem<String>(
+                            value: d["id"] as String?,
+                            child: Text(d["nome"]?.toString() ?? ""),
+                          ),
+                        )
+                        .toList(),
+                    decoration: const InputDecoration(
+                      labelText: "Disciplina",
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (v) => setStateDialog(() => disc = v),
+                  ),
+
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: TextEditingController(text: bimestre),
+                    decoration: const InputDecoration(
+                        labelText: "Bimestre (ex: 1º Bimestre)"),
+                    onChanged: (v) => bimestre = v,
+                  ),
+
+                  const SizedBox(height: 20),
+                  const Text(
+                    "Anexos:",
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+
+                  ...anexos.map(
+                    (a) => Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.attach_file),
+                        title: Text(a["nome"]),
+                        trailing: IconButton(
+                          icon:
+                              const Icon(Icons.delete, color: Colors.redAccent),
+                          onPressed: () =>
+                              setStateDialog(() => anexos.remove(a)),
+                        ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 18),
+
                   ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xffff9800),
-                      foregroundColor: Colors.white,
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    icon: const Icon(Icons.save),
-                    label: const Text('Salvar Atividade'),
+                    icon: const Icon(Icons.add),
+                    label: const Text("Adicionar anexo"),
                     onPressed: () async {
-                      if (tituloCtrl.text.isEmpty ||
-                          turmaId == null ||
-                          prazoSelecionado == null) {
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                                content: Text(
-                                    'Preencha todos os campos obrigatórios')));
-                        return;
-                      }
-
-                      await FirebaseFirestore.instance
-                          .collection('atividades')
-                          .add({
-                        'titulo': tituloCtrl.text.trim(),
-                        'disciplina': disciplinaCtrl.text.trim(),
-                        'turmaIds': [turmaId],
-                        'peso': double.tryParse(pesoCtrl.text) ?? 1,
-                        'prazo': Timestamp.fromDate(prazoSelecionado!),
-                        'professorId': _auth.currentUser?.uid,
-                        'criadoEm': FieldValue.serverTimestamp(),
-                      });
-
-                      if (context.mounted) {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                            content:
-                                Text('Atividade criada com sucesso!')));
-                        if (_turmaSelecionada == turmaId) {
-                          await _carregarAlunosEDados();
-                        }
+                      final novo = await _uploadAnexo();
+                      if (novo != null) {
+                        setStateDialog(() => anexos.add(novo));
                       }
                     },
                   ),
-                  const SizedBox(height: 20),
                 ],
               ),
-            );
-          }),
-        );
-      },
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text("Cancelar")),
+              ElevatedButton(
+                onPressed: () async {
+                  if (titulo.text.isEmpty ||
+                      turma == null ||
+                      disc == null) return;
+
+                  final agora =
+                      DateTime.now().millisecondsSinceEpoch;
+
+                  final newId = id ?? "ATV_$agora";
+
+                  final data = {
+                    "id": newId,
+                    "titulo": titulo.text.trim(),
+                    "descricao": desc.text.trim(),
+                    "turmaId": turma,
+                    "disciplinaId": disc,
+                    "bimestre": bimestre,
+                    "professorId": _auth.currentUser!.uid,
+                    "anexos": anexos,
+                    "criadoEmMs": dados?["criadoEmMs"] ?? agora,
+                  };
+
+                  await FirebaseFirestore.instance
+                      .collection("atividades")
+                      .doc(newId)
+                      .set(data, SetOptions(merge: true));
+
+                  Navigator.pop(context);
+                },
+                child: const Text("Salvar"),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

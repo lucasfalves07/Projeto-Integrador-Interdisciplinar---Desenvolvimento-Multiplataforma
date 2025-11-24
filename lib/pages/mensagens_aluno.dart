@@ -1,10 +1,11 @@
-// lib/pages/mensagens_aluno.dart
-import 'dart:math';
+// ---------------------------------------------------------------
+//  MENSAGENS DO ALUNO — VERSÃO FINAL, MODERNA E 100% CORRIGIDA
+// ---------------------------------------------------------------
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:poliedro_flutter/services/firestore_service.dart';
 
 class MensagensAlunoPage extends StatefulWidget {
   const MensagensAlunoPage({super.key});
@@ -13,395 +14,721 @@ class MensagensAlunoPage extends StatefulWidget {
   State<MensagensAlunoPage> createState() => _MensagensAlunoPageState();
 }
 
-class _MensagensAlunoPageState extends State<MensagensAlunoPage> {
+class _MensagensAlunoPageState extends State<MensagensAlunoPage>
+    with SingleTickerProviderStateMixin {
   final _auth = FirebaseAuth.instance;
-  final _fs = FirestoreService();
-  final _date = DateFormat('dd/MM/yyyy HH:mm');
+  final _db = FirebaseFirestore.instance;
+  final _fmt = DateFormat('dd/MM HH:mm');
 
-  final TextEditingController _searchCtrl = TextEditingController();
-  final TextEditingController _respostaCtrl = TextEditingController();
+  String alunoUid = "";
+  String alunoRA = "";
+  String alunoNome = "";
+  List<String> turmasIds = [];
+  Map<String, String> turmaNomes = {};
 
   bool _loading = true;
   String? _erro;
-  List<Map<String, dynamic>> _mensagens = [];
+  bool _erroPermissao = false;
 
-  final Map<String, String> _nomePorUid = {};
-  String _filtroDisciplina = 'Todas';
+  late TabController _tabs;
 
-  String alunoRA = '';
-  List<String> turmas = [];
+  List<String> professoresIds = [];
+  Map<String, String> professoresNomes = {};
+
+  String? professorSelecionado;
+  String? turmaSelecionada;
+
+  final _msgPrivadaCtrl = TextEditingController();
+  final _msgTurmaCtrl = TextEditingController();
+  final Set<String> _threadsGarantidas = {};
 
   @override
   void initState() {
     super.initState();
-    _carregar();
+    _tabs = TabController(length: 2, vsync: this);
+    _carregarAluno();
   }
 
   @override
   void dispose() {
-    _searchCtrl.dispose();
-    _respostaCtrl.dispose();
+    _tabs.dispose();
+    _msgPrivadaCtrl.dispose();
+    _msgTurmaCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _carregar() async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) {
-      setState(() {
-        _erro = 'Usuário não autenticado';
+  // ============================================================
+  Future<void> _carregarAluno() async {
+    try {
+      final uid = _auth.currentUser?.uid;
+      if (uid == null) throw "Usuário não logado";
+
+      alunoUid = uid;
+
+      final userSnap = await _db.collection("users").doc(uid).get();
+      if (!userSnap.exists) throw "Usuário não encontrado";
+
+      alunoRA = (userSnap.data()?["ra"] ?? "").toString();
+      alunoNome = (userSnap.data()?["nome"] ?? "").toString();
+
+      final dynamic turmasCampo = userSnap.data()?["turmas"];
+      final tmpTurmas = <String>[];
+      if (turmasCampo is List) {
+        tmpTurmas.addAll(
+          turmasCampo.map((e) => e.toString()).where((e) => e.isNotEmpty),
+        );
+      } else if (turmasCampo is String && turmasCampo.isNotEmpty) {
+        tmpTurmas.add(turmasCampo);
+      }
+
+      final fallbackTurma =
+          (userSnap.data()?["turmaId"] ?? userSnap.data()?["turma"])
+              ?.toString();
+      if (fallbackTurma != null &&
+          fallbackTurma.isNotEmpty &&
+          !tmpTurmas.contains(fallbackTurma)) {
+        tmpTurmas.add(fallbackTurma);
+      }
+
+      turmasIds = tmpTurmas;
+
+      if (turmasIds.isNotEmpty) turmaSelecionada = turmasIds.first;
+
+      for (final id in turmasIds) {
+        try {
+          final t = await _db.collection("turmas").doc(id).get();
+          if (t.exists) {
+            turmaNomes[id] = (t.data()?["nome"] ?? id).toString();
+          }
+        } catch (e) {
+          debugPrint("Erro ao carregar turma $id: $e");
+        }
+      }
+
+      await _carregarProfessores();
+
+      _safeSetState(() => _loading = false);
+    } on FirebaseException catch (e) {
+      _safeSetState(() {
+        _erroPermissao = e.code == "permission-denied";
+        _erro = _erroPermissao
+            ? "Sem permissão para carregar suas mensagens."
+            : "Erro ao carregar: ${e.message ?? e.code}";
         _loading = false;
       });
-      return;
+    } catch (e) {
+      _safeSetState(() {
+        _erro = "Erro ao carregar: $e";
+        _loading = false;
+      });
     }
+  }
+
+  Future<void> _garantirThreadAluno(String profUid) async {
+    if (alunoRA.isEmpty) return;
+
+    final threadId = "${alunoRA}_$profUid";
+    if (_threadsGarantidas.contains(threadId)) return;
+    _threadsGarantidas.add(threadId);
 
     try {
-      final alunoData = await _fs.getUserByUid(uid);
-      alunoRA = alunoData?['ra'] ?? '';
-      turmas = (alunoData?['turmas'] as List?)?.cast<String>() ?? <String>[];
+      final ref = _db.collection("threads").doc(threadId);
+      final snap = await ref.get();
+      if (snap.exists) return;
 
-      if (turmas.isEmpty && alunoRA.isEmpty) {
-        setState(() {
-          _mensagens = [];
-          _loading = false;
-        });
+      final turmaPadrao =
+          turmaSelecionada ?? (turmasIds.isNotEmpty ? turmasIds.first : null);
+
+      final participantes = <String>{
+        profUid,
+        alunoRA,
+        if (alunoUid.isNotEmpty) alunoUid,
+      }.toList();
+
+      await ref.set({
+        "id": threadId,
+        "alunoRa": alunoRA,
+        if (alunoUid.isNotEmpty) "alunoUid": alunoUid,
+        "alunoNome": alunoNome,
+        "professorUid": profUid,
+        "professorId": profUid,
+        "professorNome": professoresNomes[profUid] ?? "",
+        "turmaId": turmaPadrao,
+        "participantes": participantes,
+        "lastMessage": "",
+        "createdAt": FieldValue.serverTimestamp(),
+        "updatedAt": FieldValue.serverTimestamp(),
+        "aberto": true,
+      }, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      debugPrint(
+        "Erro ao garantir thread $threadId: ${e.message ?? e.code}",
+      );
+      _threadsGarantidas.remove(threadId);
+    } catch (e) {
+      debugPrint("Erro ao garantir thread $threadId: $e");
+      _threadsGarantidas.remove(threadId);
+    }
+  }
+
+  // ============================================================
+  Future<void> _carregarProfessores() async {
+    final Set<String> ids = {};
+    final Map<String, String> nomes = {};
+
+    Future<void> addProfessor(String? id, {String? nome}) async {
+      if (id == null || id.isEmpty) return;
+      ids.add(id);
+      if (nome != null && nome.trim().isNotEmpty) {
+        nomes[id] = nome.trim();
         return;
       }
-
-      final db = FirebaseFirestore.instance;
-      final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs = [];
-
-      // Lote de busca por turmaId (10 por vez)
-      for (int i = 0; i < turmas.length; i += 10) {
-        final slice = turmas.sublist(i, min(i + 10, turmas.length));
-        final snap = await db
-            .collection('mensagens')
-            .where('destinatario', whereIn: [...slice, alunoRA])
-            .orderBy('enviadaEm', descending: true)
-            .get();
-        docs.addAll(snap.docs);
+      if (!nomes.containsKey(id)) {
+        final fetched = await _buscarNomeProfessor(id);
+        if (fetched != null && fetched.isNotEmpty) {
+          nomes[id] = fetched;
+        }
       }
+    }
 
-      final List<Map<String, dynamic>> msgs = [];
-      final autores = <String>{};
-
-      for (final d in docs) {
-        final data = d.data();
-        msgs.add({'id': d.id, ...data});
-        if (data['professorId'] is String) autores.add(data['professorId']);
+    for (final turma in turmasIds) {
+      try {
+        final snap = await _db.collection("turmas").doc(turma).get();
+        final data = snap.data();
+        if (data == null) continue;
+        await addProfessor(
+          (data["professorId"] ?? "").toString(),
+          nome: data["professorNome"]?.toString(),
+        );
+      } catch (e) {
+        debugPrint("Erro ao carregar dados da turma $turma: $e");
       }
+    }
 
-      for (final id in autores) {
-        if (_nomePorUid.containsKey(id)) continue;
-        try {
-          final u = await _fs.getUserByUid(id);
-          if (u != null) _nomePorUid[id] = u['nome'] ?? 'Professor';
-        } catch (_) {}
+    final threads = await _buscarThreadsDoAluno();
+
+    for (final th in threads) {
+      final participantes =
+          (th["participantes"] as List?)?.map((e) => e.toString()).toList() ??
+              [];
+      participantes
+          .removeWhere((p) => p == alunoRA || p == alunoUid || p.isEmpty);
+      if (participantes.isEmpty) continue;
+      await addProfessor(participantes.first);
+    }
+
+    _safeSetState(() {
+      professoresIds = ids.toList();
+      professoresNomes = nomes;
+
+      if (professoresIds.isNotEmpty) {
+        if (professorSelecionado == null ||
+            !professoresIds.contains(professorSelecionado)) {
+          professorSelecionado = professoresIds.first;
+        }
+      } else {
+        professorSelecionado = null;
       }
+    });
 
-      msgs.sort((a, b) =>
-          _millis(b['enviadaEm']).compareTo(_millis(a['enviadaEm'])));
-
-      setState(() {
-        _mensagens = msgs;
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _erro = 'Erro ao carregar mensagens: $e';
-        _loading = false;
-      });
+    final selecionado = professorSelecionado;
+    if (selecionado != null) {
+      _garantirThreadAluno(selecionado);
     }
   }
 
-  int _millis(dynamic ts) {
-    if (ts is Timestamp) return ts.millisecondsSinceEpoch;
-    if (ts is Map && ts['_seconds'] is int) return (ts['_seconds'] as int) * 1000;
-    return 0;
-  }
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+      _buscarThreadsDoAluno() async {
+    final base = _db.collection("threads");
+    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> docs = {};
 
-  List<String> _disciplinas() {
-    final set = <String>{};
-    for (final m in _mensagens) {
-      final disc = (m['disciplina'] ?? '').toString();
-      if (disc.isNotEmpty) set.add(disc);
+    Future<void> tentar(Query<Map<String, dynamic>> query,
+        {bool tentarCorrigir = false}) async {
+      try {
+        final snap = await query.get();
+        for (final doc in snap.docs) {
+          docs[doc.id] = doc;
+          if (tentarCorrigir) {
+            await _corrigirParticipantes(doc.reference, doc.data());
+          }
+        }
+      } on FirebaseException catch (e) {
+        if (e.code == "permission-denied") return;
+        rethrow;
+      }
     }
-    final list = ['Todas', ...set.toList()..sort()];
-    if (!list.contains(_filtroDisciplina)) _filtroDisciplina = 'Todas';
-    return list;
+
+    if (alunoUid.isNotEmpty) {
+      await tentar(base.where("participantes", arrayContains: alunoUid));
+    }
+
+    if (docs.isEmpty && alunoUid.isNotEmpty) {
+      await tentar(base.where("alunoUid", isEqualTo: alunoUid),
+          tentarCorrigir: true);
+    }
+
+    if (docs.isEmpty && alunoRA.isNotEmpty) {
+      await tentar(base.where("alunoRa", isEqualTo: alunoRA),
+          tentarCorrigir: true);
+      await tentar(base.where("participantes", arrayContains: alunoRA),
+          tentarCorrigir: true);
+    }
+
+    return docs.values.toList();
   }
 
-  List<Map<String, dynamic>> _aplicarFiltros() {
-    final q = _searchCtrl.text.trim().toLowerCase();
-    final disc = _filtroDisciplina;
+  Future<void> _corrigirParticipantes(
+    DocumentReference<Map<String, dynamic>> ref,
+    Map<String, dynamic> data,
+  ) async {
+    final participantes = <String>{
+      ...((data["participantes"] as List?) ?? [])
+          .map((e) => e?.toString() ?? "")
+          .where((e) => e.isNotEmpty),
+    };
 
-    return _mensagens.where((m) {
-      final texto = (m['mensagem'] ?? '').toString().toLowerCase();
-      final professor = _nomePorUid[m['professorId']]?.toLowerCase() ?? '';
-      final d = (m['disciplina'] ?? '').toString();
-      final okBusca = q.isEmpty || texto.contains(q) || professor.contains(q);
-      final okDisc = disc == 'Todas' || d == disc;
-      return okBusca && okDisc;
-    }).toList();
+    bool mudou = false;
+
+    if (alunoUid.isNotEmpty && !participantes.contains(alunoUid)) {
+      participantes.add(alunoUid);
+      mudou = true;
+    }
+
+    if (alunoRA.isNotEmpty && !participantes.contains(alunoRA)) {
+      participantes.add(alunoRA);
+      mudou = true;
+    }
+
+    final updates = <String, dynamic>{};
+
+    if (mudou) {
+      updates["participantes"] = participantes.toList();
+    }
+
+    if (alunoUid.isNotEmpty && data["alunoUid"] != alunoUid) {
+      updates["alunoUid"] = alunoUid;
+    }
+
+    if (updates.isNotEmpty) {
+      await ref.set(updates, SetOptions(merge: true));
+    }
   }
 
-  bool _isNovo(int tsMillis) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    return (now - tsMillis) <= const Duration(days: 2).inMilliseconds;
-  }
+  // ============================================================
+  Future<void> _enviarPrivado() async {
+    final texto = _msgPrivadaCtrl.text.trim();
+    if (texto.isEmpty || professorSelecionado == null) return;
 
-  Future<void> _enviarResposta(String professorId) async {
-    final texto = _respostaCtrl.text.trim();
-    if (texto.isEmpty) return;
+    final profUid = professorSelecionado!;
+    final professorNome = professoresNomes[profUid] ?? "";
+    final threadId = "${alunoRA}_$profUid";
+    final turmaPadrao =
+        turmaSelecionada ?? (turmasIds.isNotEmpty ? turmasIds.first : null);
 
     try {
-      await FirebaseFirestore.instance.collection('mensagens').add({
-        'mensagem': texto,
-        'alunoId': _auth.currentUser?.uid,
-        'alunoRA': alunoRA,
-        'professorId': professorId,
-        'destinatario': professorId,
-        'enviadaEm': DateTime.now(),
-        'dataFormatada':
-            DateFormat('dd/MM/yyyy HH:mm').format(DateTime.now()),
+      final ref = _db.collection("threads").doc(threadId);
+      final snap = await ref.get();
+      final data = snap.data();
+      final turmaId = (data?["turmaId"] ?? turmaPadrao)?.toString();
+
+      final participantes = <String>{
+        profUid,
+        alunoRA,
+        if (alunoUid.isNotEmpty) alunoUid,
+      }.toList();
+
+      await ref.set({
+        "id": threadId,
+        "alunoRa": alunoRA,
+        "alunoUid": alunoUid,
+        "alunoNome": alunoNome,
+        "professorUid": profUid,
+        "professorId": profUid,
+        "professorNome": professorNome,
+        "participantes": participantes,
+        "turmaId": turmaId,
+        "lastMessage": texto,
+        "updatedAt": FieldValue.serverTimestamp(),
+        "createdAt": data?["createdAt"] ?? FieldValue.serverTimestamp(),
+        "aberto": true,
+      }, SetOptions(merge: true));
+
+      await ref.collection("itens").add({
+        "texto": texto,
+        "fromUid": alunoUid,
+        "createdAt": FieldValue.serverTimestamp(),
       });
 
-      _respostaCtrl.clear();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Resposta enviada ao professor.')),
-      );
+      _msgPrivadaCtrl.clear();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao enviar resposta: $e')),
-      );
+      _erroSnack("Erro ao enviar: $e");
     }
   }
 
+  // ============================================================
+  Future<void> _enviarTurma() async {
+    final texto = _msgTurmaCtrl.text.trim();
+    if (texto.isEmpty || turmaSelecionada == null) return;
+
+    try {
+      await _db
+          .collection("turmas")
+          .doc(turmaSelecionada)
+          .collection("mensagens")
+          .add({
+        "mensagem": texto,
+        "autorUid": alunoUid,
+        "alunoRa": alunoRA,
+        "createdAt": FieldValue.serverTimestamp(),
+      });
+
+      _msgTurmaCtrl.clear();
+    } catch (e) {
+      _erroSnack("Erro ao enviar: $e");
+    }
+  }
+
+  Future<String?> _buscarNomeProfessor(String profId) async {
+    try {
+      final usuario = await _db.collection("users").doc(profId).get();
+      final data = usuario.data();
+      if (data != null) {
+        final nome = (data["nome"] ?? "").toString();
+        if (nome.isNotEmpty) return nome;
+      }
+
+      final discSnap = await _db
+          .collection("disciplinas")
+          .where("professorId", isEqualTo: profId)
+          .limit(1)
+          .get();
+
+      if (discSnap.docs.isNotEmpty) {
+        final disc = discSnap.docs.first.data();
+        final nome = (disc["professor"] ?? disc["nome"] ?? "").toString();
+        if (nome.isNotEmpty) return nome;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // ============================================================
+  String _fmtHora(dynamic ts) {
+    if (ts is Timestamp) return _fmt.format(ts.toDate());
+    return "";
+  }
+
+  // ============================================================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey[50],
-      body: SafeArea(
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _erro != null
-                ? Center(
-                    child: Text(_erro!,
-                        style: const TextStyle(color: Colors.redAccent)))
-                : Column(
-                    children: [
-                      _header(),
-                      const SizedBox(height: 6),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Row(
-                          children: [
-                            Expanded(child: _searchField()),
-                            const SizedBox(width: 10),
-                            _filtroDropdown(),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Expanded(child: _listaMensagens()),
-                    ],
-                  ),
-      ),
-    );
-  }
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
-  Widget _header() => Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 12, 10),
-        color: Colors.white,
-        child: Row(
-          children: [
-            IconButton(
-              onPressed: () => Navigator.of(context).maybePop(),
-              icon: const Icon(Icons.arrow_back),
+    if (_erro != null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text("Mensagens")),
+        body: Center(
+          child: Text(
+            _erro!,
+            style: TextStyle(
+              color: _erroPermissao ? Colors.orange : Colors.red,
+              fontSize: 18,
             ),
-            const SizedBox(width: 2),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text('Mensagens',
-                    style:
-                        TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                SizedBox(height: 2),
-                Text('Comunicados e respostas',
-                    style: TextStyle(color: Colors.black54, fontSize: 12)),
-              ],
-            ),
-          ],
+            textAlign: TextAlign.center,
+          ),
         ),
-      );
-
-  Widget _searchField() => TextField(
-        controller: _searchCtrl,
-        onChanged: (_) => setState(() {}),
-        decoration: InputDecoration(
-          hintText: 'Buscar mensagens...',
-          prefixIcon: const Icon(Icons.search),
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xffe6e6ee))),
-        ),
-      );
-
-  Widget _filtroDropdown() {
-    final itens = _disciplinas();
-    return SizedBox(
-      width: 140,
-      child: DropdownButtonFormField<String>(
-        value: _filtroDisciplina,
-        items: itens
-            .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-            .toList(),
-        onChanged: (v) => setState(() => _filtroDisciplina = v ?? 'Todas'),
-        decoration: InputDecoration(
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xffe6e6ee))),
-        ),
-      ),
-    );
-  }
-
-  Widget _listaMensagens() {
-    final dados = _aplicarFiltros();
-    if (dados.isEmpty) {
-      return const Center(
-        child: Text('Nenhuma mensagem encontrada',
-            style: TextStyle(color: Colors.black54)),
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 18),
-      itemCount: dados.length,
-      itemBuilder: (context, i) {
-        final m = dados[i];
-        final ts = _millis(m['enviadaEm']);
-        final professor =
-            _nomePorUid[m['professorId']] ?? 'Professor Desconhecido';
-        final texto = (m['mensagem'] ?? '').toString();
-        final data = m['dataFormatada'] ?? _date.format(DateTime.now());
-        final novo = _isNovo(ts);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Mensagens"),
+        centerTitle: true,
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        bottom: TabBar(
+          controller: _tabs,
+          labelColor: Colors.deepPurple,
+          unselectedLabelColor: Colors.black54,
+          tabs: const [
+            Tab(text: "Turma"),
+            Tab(text: "Professor"),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabs,
+        children: [
+          _abaTurma(),
+          _abaPrivado(),
+        ],
+      ),
+    );
+  }
 
-        return _MensagemCard(
-          professor: professor,
-          texto: texto,
-          data: data,
-          novo: novo,
-          onResponder: () => _abrirDialogResposta(professor, m['professorId']),
+  // ============================================================
+  Widget _abaTurma() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: DropdownButtonFormField<String>(
+            value:
+                turmasIds.contains(turmaSelecionada) ? turmaSelecionada : null,
+            decoration: const InputDecoration(
+              labelText: "Turma",
+              border: OutlineInputBorder(),
+            ),
+            items: turmasIds
+                .map((id) => DropdownMenuItem(
+                      value: id,
+                      child: Text(turmaNomes[id] ?? id),
+                    ))
+                .toList(),
+            onChanged: (v) => _safeSetState(() => turmaSelecionada = v),
+          ),
+        ),
+        Expanded(
+          child: turmaSelecionada == null
+              ? const Center(child: Text("Nenhuma turma cadastrada."))
+              : StreamBuilder(
+                  stream: _db
+                      .collection("turmas")
+                      .doc(turmaSelecionada)
+                      .collection("mensagens")
+                      .orderBy("createdAt", descending: true)
+                      .snapshots(),
+                  builder: (_, snap) {
+                    if (!snap.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+
+                    final docs = snap.data!.docs;
+
+                    if (docs.isEmpty) {
+                      return const Center(child: Text("Nenhuma mensagem."));
+                    }
+
+                    return ListView.builder(
+                      reverse: true,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: docs.length,
+                      itemBuilder: (_, i) {
+                        final m = docs[i].data();
+
+                        return _bubble(
+                          texto: m["mensagem"],
+                          hora: _fmtHora(m["createdAt"]),
+                          alinhadoDireita: m["autorUid"] == alunoUid,
+                        );
+                      },
+                    );
+                  },
+                ),
+        ),
+        _inputEnviar(
+          controller: _msgTurmaCtrl,
+          hint: "Mensagem para a turma...",
+          onSend: _enviarTurma,
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  Widget _abaPrivado() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: DropdownButtonFormField<String>(
+            value: professoresIds.contains(professorSelecionado)
+                ? professorSelecionado
+                : null,
+            decoration: const InputDecoration(
+              labelText: "Professor",
+              border: OutlineInputBorder(),
+            ),
+            items: professoresIds
+                .map((id) => DropdownMenuItem(
+                      value: id,
+                      child: Text(professoresNomes[id] ?? "Professor"),
+                    ))
+                .toList(),
+            onChanged: (v) {
+              _safeSetState(() => professorSelecionado = v);
+              if (v != null) _garantirThreadAluno(v);
+            },
+          ),
+        ),
+        Expanded(
+          child: professorSelecionado == null
+              ? const Center(child: Text("Nenhum professor encontrado."))
+              : _listaPrivado(),
+        ),
+        _inputEnviar(
+          controller: _msgPrivadaCtrl,
+          hint: "Mensagem privada...",
+          onSend: _enviarPrivado,
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  Widget _listaPrivado() {
+    final profId = professorSelecionado!;
+    final threadId = "${alunoRA}_$profId";
+
+    return FutureBuilder<void>(
+      future: _garantirThreadAluno(profId),
+      builder: (_, futureSnap) {
+        if (futureSnap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _db
+              .collection("threads")
+              .doc(threadId)
+              .collection("itens")
+              .orderBy("createdAt")
+              .snapshots(),
+          builder: (_, snap) {
+            if (snap.hasError) {
+              final erro = snap.error.toString();
+              final texto = erro.contains("permission-denied")
+                  ? "Sem permissão para visualizar esta conversa."
+                  : "Erro ao carregar conversa.";
+              return Center(
+                child: Text(
+                  texto,
+                  style: const TextStyle(color: Colors.red),
+                  textAlign: TextAlign.center,
+                ),
+              );
+            }
+
+            if (!snap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            final msgs = snap.data!.docs;
+
+            if (msgs.isEmpty) {
+              return const Center(child: Text("Nenhuma conversa."));
+            }
+
+            return ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: msgs.length,
+              itemBuilder: (_, i) {
+                final m = msgs[i].data();
+
+                return _bubble(
+                  texto: m["texto"],
+                  hora: _fmtHora(m["createdAt"]),
+                  alinhadoDireita: m["fromUid"] == alunoUid,
+                );
+              },
+            );
+          },
         );
       },
     );
   }
 
-  void _abrirDialogResposta(String professorNome, String professorId) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text("Responder para $professorNome"),
-        content: TextField(
-          controller: _respostaCtrl,
-          decoration:
-              const InputDecoration(labelText: "Digite sua mensagem..."),
-          maxLines: 3,
+  // ============================================================
+  Widget _bubble({
+    required String texto,
+    required String hora,
+    required bool alinhadoDireita,
+  }) {
+    return Align(
+      alignment: alinhadoDireita ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: alinhadoDireita
+              ? Colors.deepPurple.shade100
+              : Colors.grey.shade300,
+          borderRadius: BorderRadius.circular(14),
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              _enviarResposta(professorId);
-              Navigator.pop(context);
-            },
-            child: const Text("Enviar"),
+        child: Column(
+          crossAxisAlignment: alinhadoDireita
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            Text(
+              texto,
+              style: const TextStyle(fontSize: 15),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              hora,
+              style: const TextStyle(fontSize: 11, color: Colors.black54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  Widget _inputEnviar({
+    required TextEditingController controller,
+    required String hint,
+    required VoidCallback onSend,
+  }) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          top: BorderSide(color: Colors.black12),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              minLines: 1,
+              maxLines: 4,
+              decoration: InputDecoration(
+                hintText: hint,
+                filled: true,
+                fillColor: Colors.grey.shade200,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          CircleAvatar(
+            backgroundColor: Colors.deepPurple,
+            child: IconButton(
+              onPressed: onSend,
+              icon: const Icon(Icons.send, color: Colors.white, size: 18),
+            ),
           ),
         ],
       ),
     );
   }
-}
 
-/// CARD VISUAL DE MENSAGEM
-class _MensagemCard extends StatelessWidget {
-  final String professor;
-  final String texto;
-  final String data;
-  final bool novo;
-  final VoidCallback onResponder;
-
-  const _MensagemCard({
-    required this.professor,
-    required this.texto,
-    required this.data,
-    required this.novo,
-    required this.onResponder,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 1.5,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(professor,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 15)),
-                Text(data,
-                    style:
-                        const TextStyle(fontSize: 12, color: Colors.black54)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              texto,
-              style: const TextStyle(fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                if (novo)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade100,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Text('Novo',
-                        style:
-                            TextStyle(color: Colors.orange, fontSize: 12)),
-                  ),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: onResponder,
-                  icon: const Icon(Icons.reply, size: 18),
-                  label: const Text('Responder'),
-                ),
-              ],
-            )
-          ],
-        ),
-      ),
+  void _erroSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.red),
     );
+  }
+
+  void _safeSetState(VoidCallback fn) {
+    if (!mounted) return;
+    setState(fn);
   }
 }

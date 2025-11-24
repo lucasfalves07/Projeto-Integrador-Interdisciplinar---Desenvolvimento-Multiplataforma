@@ -3,13 +3,10 @@ import 'package:go_router/go_router.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-/// Página inicial de decisão de rota (splash router)
-/// - Verifica autenticação do Firebase.
-/// - Busca o perfil do usuário no Firestore.
-/// - Redireciona automaticamente para o dashboard correto:
-///     • /dashboard-professor
-///     • /dashboard-aluno
-/// - Se não logado, envia para /login.
+/// ============================================================================
+/// INDEX PAGE — Splash que decide automaticamente o tipo de usuário e envia
+/// para o dashboard correto.
+/// ============================================================================
 class IndexPage extends StatefulWidget {
   const IndexPage({super.key});
 
@@ -26,81 +23,92 @@ class _IndexPageState extends State<IndexPage> {
   @override
   void initState() {
     super.initState();
-    _decidirRota();
+    _resolverRota();
   }
 
-  /// Função principal que decide o destino do usuário
-  Future<void> _decidirRota() async {
-    // Pequeno atraso para garantir que o contexto esteja pronto
-    await Future<void>.delayed(const Duration(milliseconds: 100));
+  /// ==========================================================================
+  /// 🔹 Resolve automaticamente se é aluno ou professor
+  /// ==========================================================================
+  Future<void> _resolverRota() async {
+    await Future.delayed(const Duration(milliseconds: 80));
 
     try {
       final user = _auth.currentUser;
 
-      // Caso não esteja logado
       if (user == null) {
         if (!mounted) return;
         context.go('/login');
         return;
       }
 
-      // Busca o documento do usuário no Firestore
+      // Tenta buscar perfil no Firestore
       final doc = await _db.collection('users').doc(user.uid).get();
 
-      if (!doc.exists) {
-        setState(() {
-          _error =
-              'Seu perfil (users/${user.uid}) não foi encontrado no Firestore.\n'
-              'Peça para um professor ou administrador configurar seu usuário.';
-        });
-        return;
+      String role = '';
+
+      if (doc.exists) {
+        final data = doc.data() ?? {};
+        role = (data['role'] ??
+                data['tipo'] ??
+                data['perfil'] ??
+                data['userType'] ??
+                '')
+            .toString()
+            .trim()
+            .toLowerCase();
       }
 
-      final data = doc.data() ?? {};
-
-      // Verifica o campo "tipo" ou "role" (aceita ambos)
-      String tipo = (data['tipo'] ?? data['role'] ?? '').toString().toLowerCase().trim();
-
-      // Se o campo estiver ausente, tenta inferir pelo e-mail (fallback)
-      if (tipo.isEmpty) {
+      // Caso o Firestore não tenha role definida, tenta inferir pelo email
+      if (role.isEmpty) {
         final email = user.email ?? '';
-        if (email.contains('prof') || email.contains('teacher')) {
-          tipo = 'professor';
+
+        if (email.contains('@sistemapoliedro')) {
+          role = 'professor';
+        } else if (email.contains('@alunosistemapoliedro')) {
+          role = 'aluno';
         } else {
-          tipo = 'aluno';
+          // Último fallback → considera aluno
+          role = 'aluno';
         }
       }
 
       if (!mounted) return;
 
-      // Redireciona conforme o tipo identificado
-      switch (tipo) {
-        case 'professor':
-          context.go('/dashboard-professor');
-          break;
-
-        case 'aluno':
-          context.go('/dashboard-aluno');
-          break;
-
-        default:
-          setState(() {
-            _error = '''
-Campo "tipo/role" inválido no seu perfil: "$tipo".
-Verifique no Firestore se está definido como "aluno" ou "professor".
-            ''';
-          });
+      // Envio para dashboard correto
+      if (role == 'professor') {
+        context.go('/dashboard-professor');
+        return;
       }
+      if (role == 'aluno') {
+        context.go('/dashboard-aluno');
+        return;
+      }
+
+      // Se caiu aqui, role inválido
+      setState(() {
+        _error = '''
+O valor do seu campo "role/tipo" é inválido: "$role".
+
+Defina no Firestore como:
+• aluno
+• professor
+
+(users/${user.uid})
+''';
+      });
     } catch (e) {
       setState(() {
-        _error = '⚠️ Falha ao decidir rota: $e';
+        _error =
+            '⚠️ Não foi possível decidir automaticamente seu painel.\nErro: $e';
       });
     }
   }
 
+  /// ==========================================================================
+  /// 🔹 UI
+  /// ==========================================================================
   @override
   Widget build(BuildContext context) {
-    // Se deu erro, mostra mensagem amigável
     if (_error != null) {
       return Scaffold(
         body: Center(
@@ -111,24 +119,32 @@ Verifique no Firestore se está definido como "aluno" ou "professor".
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.error_outline, size: 48, color: Colors.redAccent),
+                  const Icon(Icons.error_outline,
+                      size: 50, color: Colors.redAccent),
                   const SizedBox(height: 16),
                   const Text(
-                    'Não foi possível abrir seu painel',
+                    "Não foi possível abrir seu painel",
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                    style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Text(
                     _error!,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      color: Colors.black54,
+                      height: 1.4,
+                    ),
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.black54),
                   ),
                   const SizedBox(height: 24),
                   FilledButton.icon(
                     onPressed: () => context.go('/login'),
-                    icon: const Icon(Icons.logout),
-                    label: const Text('Voltar para o login'),
+                    icon: const Icon(Icons.login),
+                    label: const Text("Voltar ao Login"),
                   ),
                 ],
               ),
@@ -138,20 +154,20 @@ Verifique no Firestore se está definido como "aluno" ou "professor".
       );
     }
 
-    // Tela de carregamento enquanto decide a rota
+    // Tela de carregamento
     return const Scaffold(
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             SizedBox(
-              height: 28,
-              width: 28,
+              width: 30,
+              height: 30,
               child: CircularProgressIndicator(strokeWidth: 3),
             ),
             SizedBox(height: 16),
             Text(
-              'Carregando seu ambiente...',
+              "Carregando seu ambiente...",
               style: TextStyle(color: Colors.black54),
             ),
           ],

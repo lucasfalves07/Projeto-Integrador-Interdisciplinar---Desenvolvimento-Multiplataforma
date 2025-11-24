@@ -1,3 +1,7 @@
+// ---------------------------------------------------------------
+// NOVA ATIVIDADE — 100% COMPATÍVEL COM atividades_page.dart
+// ---------------------------------------------------------------
+
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -6,7 +10,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
-import 'upload_dialog.dart';
 
 class NovaAtividadePage extends StatefulWidget {
   const NovaAtividadePage({super.key});
@@ -19,8 +22,11 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
   final _auth = FirebaseAuth.instance;
 
   final _tituloCtrl = TextEditingController();
+  final _descricaoCtrl = TextEditingController();
   final _disciplinaCtrl = TextEditingController();
-  final _pesoCtrl = TextEditingController(text: '1');
+  final _pesoCtrl = TextEditingController(text: "1");
+  final _maxCtrl = TextEditingController(text: "10");
+  final _bimestreCtrl = TextEditingController(text: "1º Bimestre");
   final _prazoCtrl = TextEditingController();
 
   DateTime? _prazoSelecionado;
@@ -29,7 +35,6 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
   List<Map<String, dynamic>> _turmas = [];
   final Set<String> _turmasSelecionadas = {};
 
-  // arquivos selecionados antes de salvar (opcional)
   List<PlatformFile> _arquivosSelecionados = [];
 
   @override
@@ -38,32 +43,21 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
     _carregarTurmasDoProfessor();
   }
 
-  @override
-  void dispose() {
-    _tituloCtrl.dispose();
-    _disciplinaCtrl.dispose();
-    _pesoCtrl.dispose();
-    _prazoCtrl.dispose();
-    super.dispose();
-  }
-
   Future<void> _carregarTurmasDoProfessor() async {
     try {
       final uid = _auth.currentUser?.uid;
+
       final snap = await FirebaseFirestore.instance
-          .collection('turmas')
-          .where('professorId', isEqualTo: uid)
-          .orderBy('nome')
+          .collection("turmas")
+          .where("professorId", isEqualTo: uid)
+          .orderBy("nome")
           .get();
 
       setState(() {
-        _turmas = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+        _turmas = snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
       });
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao carregar turmas: $e')),
-      );
+      _erro("Erro ao carregar turmas: $e");
     }
   }
 
@@ -71,71 +65,76 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
     try {
       final res = await FilePicker.platform.pickFiles(
         allowMultiple: true,
-        withData: kIsWeb, // no web precisamos dos bytes
+        withData: true,
         type: FileType.any,
       );
+
       if (res != null) {
-        setState(() {
-          _arquivosSelecionados = res.files;
-        });
+        setState(() => _arquivosSelecionados = res.files);
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Falha ao selecionar arquivos: $e')),
-      );
+      _erro("Erro ao selecionar arquivos: $e");
     }
   }
 
   Future<void> _salvar() async {
-    if (_tituloCtrl.text.trim().isEmpty) {
-      _erro('Informe o título.');
-      return;
-    }
-    if (_turmasSelecionadas.isEmpty) {
-      _erro('Selecione ao menos uma turma.');
-      return;
-    }
-    if (_prazoSelecionado == null) {
-      _erro('Selecione o prazo.');
-      return;
-    }
+    if (_tituloCtrl.text.trim().isEmpty) return _erro("Informe o título.");
+    if (_disciplinaCtrl.text.trim().isEmpty) return _erro("Informe o ID da disciplina.");
+    if (_turmasSelecionadas.isEmpty) return _erro("Selecione ao menos uma turma.");
+    if (_prazoSelecionado == null) return _erro("Selecione o prazo.");
 
     setState(() => _salvando = true);
+
     try {
-      // cria documento da atividade sem anexos
-      final docRef = await FirebaseFirestore.instance
-          .collection('atividades')
-          .add({
-        'titulo': _tituloCtrl.text.trim(),
-        'disciplina': _disciplinaCtrl.text.trim(),
-        'peso': double.tryParse(_pesoCtrl.text.replaceAll(',', '.')) ?? 1.0,
-        'prazo': Timestamp.fromDate(_prazoSelecionado!),
-        'turmaIds': _turmasSelecionadas.toList(),
-        'professorId': _auth.currentUser?.uid,
-        'criadoEm': FieldValue.serverTimestamp(),
-        'anexos': [],
-      });
+      final uid = _auth.currentUser!.uid;
+      final peso = double.tryParse(_pesoCtrl.text.replaceAll(",", ".")) ?? 1;
+      final max = double.tryParse(_maxCtrl.text.replaceAll(",", ".")) ?? 10;
 
-      // se houver arquivos, sobe pro Storage e preenche "anexos"
-      if (_arquivosSelecionados.isNotEmpty) {
-        final anexos = await _uploadArquivosAtividade(
-          atividadeId: docRef.id,
-          arquivos: _arquivosSelecionados,
-        );
+      for (final turmaId in _turmasSelecionadas) {
+        final agora = DateTime.now().millisecondsSinceEpoch;
 
-        await docRef.update({
-          'anexos': FieldValue.arrayUnion(anexos),
+        final docRef = FirebaseFirestore.instance
+            .collection("atividades")
+            .doc("A$agora-$turmaId");
+
+        await docRef.set({
+          "id": "A$agora-$turmaId",
+          "titulo": _tituloCtrl.text.trim(),
+          "descricao": _descricaoCtrl.text.trim(),
+          "bimestre": _bimestreCtrl.text.trim(),
+          "max": max,
+          "peso": peso,
+          "disciplinaId": _disciplinaCtrl.text.trim(),
+          "professorId": uid,
+          "turmaId": turmaId,
+          "criadoEm": FieldValue.serverTimestamp(),
+          "criadoEmMs": agora,
+          "prazo": Timestamp.fromDate(_prazoSelecionado!),
+          "arquivoUrl": null,
+          "arquivoNome": null,
+          "anexos": [],
         });
+
+        if (_arquivosSelecionados.isNotEmpty) {
+          final anexos = await _uploadArquivosAtividade(
+            atividadeId: docRef.id,
+            arquivos: _arquivosSelecionados,
+          );
+
+          await docRef.update({
+            "anexos": FieldValue.arrayUnion(anexos),
+          });
+        }
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Atividade criada com sucesso!')),
-      );
+      Navigator.of(context).pop(true);
 
-      Navigator.of(context).pop(true); // volta sinalizando sucesso
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Atividade criada com sucesso!")),
+      );
     } catch (e) {
-      _erro('Erro ao salvar: $e');
+      _erro("Erro ao salvar atividade: $e");
     } finally {
       if (mounted) setState(() => _salvando = false);
     }
@@ -146,78 +145,44 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
     required List<PlatformFile> arquivos,
   }) async {
     final storage = FirebaseStorage.instance;
-    final List<Map<String, dynamic>> saida = [];
+    List<Map<String, dynamic>> saida = [];
 
-    for (final f in arquivos) {
+    for (final file in arquivos) {
       try {
-        final nomeOriginal = f.name;
-        final caminho =
-            'atividades/$atividadeId/${DateTime.now().millisecondsSinceEpoch}_$nomeOriginal';
+        final path =
+            "atividades/$atividadeId/${DateTime.now().millisecondsSinceEpoch}_${file.name}";
 
-        UploadTask task;
-        if (kIsWeb) {
-          final Uint8List data =
-              f.bytes ?? Uint8List.fromList(const []);
-          task = storage.ref(caminho).putData(
-                data,
+        UploadTask upload;
+
+        if (kIsWeb || file.path == null) {
+          upload = storage.ref(path).putData(
+                file.bytes!,
                 SettableMetadata(
-                  contentType: f.extension != null
-                      ? _mapContentType(f.extension!)
-                      : 'application/octet-stream',
+                  contentType: _mapContentType(file.extension ?? ""),
                 ),
               );
         } else {
-          // mobile/desktop
-          if (f.path == null) {
-            // fallback
-            final Uint8List data =
-                f.bytes ?? Uint8List.fromList(const []);
-            task = storage.ref(caminho).putData(
-                  data,
-                  SettableMetadata(
-                    contentType: f.extension != null
-                        ? _mapContentType(f.extension!)
-                        : 'application/octet-stream',
-                  ),
-                );
-          } else {
-            task = storage.ref(caminho).putFile(
-                  // ignore: deprecated_member_use
-                  // (PlatformFile.path ainda é a forma mais simples)
-                  // File importado em upload_dialog.dart, aqui usamos putData/putFile via path
-                  // mas pra evitar dependência de dart:io aqui, já tratamos o cenário acima.
-                  // Se quiser 100% sem path, deixe sempre withData: true no FilePicker.
-                  // Porém, manteremos esse branch para compatibilidade.
-                  // Você pode manter apenas o putData se preferir.
-                  // No entanto, como este arquivo não importa dart:io, usamos apenas putData no fallback acima.
-                  // Portanto, para evitar warnings, faremos sempre via putData no fluxo acima.
-                  // (mantemos esse comentário por clareza)
-                  // -> Removido caminho local aqui.
-                  // Esse else não será atingido porque optamos por withData no pick.
-                  // Mas caso remover withData, adapte para usar File(f.path!)
-                  // Ex: File(f.path!)
-                  // Aqui, usaremos putData como fallback:
-                  // ignore: dead_code
-                  throw UnimplementedError(),
-                );
-          }
+          upload = storage.ref(path).putData(
+                file.bytes!,
+                SettableMetadata(
+                  contentType: _mapContentType(file.extension ?? ""),
+                ),
+              );
         }
 
-        final snap = await task;
+        final snap = await upload;
         final url = await snap.ref.getDownloadURL();
-        final meta = await snap.ref.getMetadata();
 
         saida.add({
-          'nome': nomeOriginal,
-          'url': url,
-          'contentType': meta.contentType ?? '',
-          'storagePath': snap.ref.fullPath,
-          'tamanho': f.size,
-          'criadoEm': FieldValue.serverTimestamp(),
+          "nome": file.name,
+          "url": url,
+          "storagePath": snap.ref.fullPath,
+          "contentType": snap.metadata?.contentType ?? "",
+          "tamanho": file.size,
+          "criadoEm": FieldValue.serverTimestamp(),
         });
       } catch (e) {
-        // segue o baile — faz upload do que conseguir
-        debugPrint('Falha upload "$e" para arquivo ${f.name}');
+        debugPrint("Erro ao enviar arquivo: $e");
       }
     }
 
@@ -226,176 +191,178 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
 
   String _mapContentType(String ext) {
     switch (ext.toLowerCase()) {
-      case 'pdf':
-        return 'application/pdf';
-      case 'doc':
-        return 'application/msword';
-      case 'docx':
-        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-      case 'xls':
-        return 'application/vnd.ms-excel';
-      case 'xlsx':
-        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-      case 'ppt':
-        return 'application/vnd.ms-powerpoint';
-      case 'pptx':
-        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-      case 'png':
-        return 'image/png';
-      case 'jpg':
-      case 'jpeg':
-        return 'image/jpeg';
-      case 'gif':
-        return 'image/gif';
-      case 'mp4':
-        return 'video/mp4';
-      case 'avi':
-        return 'video/x-msvideo';
-      case 'mov':
-        return 'video/quicktime';
-      case 'mp3':
-        return 'audio/mpeg';
+      case "pdf":
+        return "application/pdf";
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      case "png":
+        return "image/png";
+      case "mp4":
+        return "video/mp4";
+      case "doc":
+        return "application/msword";
+      case "docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       default:
-        return 'application/octet-stream';
+        return "application/octet-stream";
     }
   }
 
   void _erro(String msg) {
-    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   Widget build(BuildContext context) {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
-    final turmasVazias = _turmas.isEmpty;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Nova Atividade'),
-      ),
+      appBar: AppBar(title: const Text("Nova Atividade")),
       body: Padding(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottom),
+        padding: EdgeInsets.fromLTRB(16, 10, 16, bottom + 16),
         child: SingleChildScrollView(
           child: Column(
             children: [
               TextField(
                 controller: _tituloCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Título',
+                  labelText: "Título",
                   border: OutlineInputBorder(),
                 ),
               ),
               const SizedBox(height: 10),
+
+              TextField(
+                controller: _descricaoCtrl,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: "Descrição (opcional)",
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+
               TextField(
                 controller: _disciplinaCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Disciplina',
+                  labelText: "ID da disciplina (disciplinaId)",
                   border: OutlineInputBorder(),
                 ),
               ),
               const SizedBox(height: 10),
+
               TextField(
                 controller: _pesoCtrl,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
+                keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: 'Peso',
+                  labelText: "Peso",
                   border: OutlineInputBorder(),
                 ),
               ),
+
               const SizedBox(height: 10),
+
+              TextField(
+                controller: _maxCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: "Nota máxima",
+                  border: OutlineInputBorder(),
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
+              TextField(
+                controller: _bimestreCtrl,
+                decoration: const InputDecoration(
+                  labelText: "Bimestre",
+                  border: OutlineInputBorder(),
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
               TextField(
                 controller: _prazoCtrl,
                 readOnly: true,
-                decoration: InputDecoration(
-                  labelText: 'Prazo',
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.calendar_month),
-                    onPressed: () async {
-                      final pick = await showDatePicker(
-                        context: context,
-                        firstDate: DateTime.now(),
-                        lastDate: DateTime(2100),
-                        initialDate: DateTime.now(),
-                      );
-                      if (pick != null) {
-                        setState(() {
-                          _prazoSelecionado = pick;
-                          _prazoCtrl.text =
-                              DateFormat('dd/MM/yyyy').format(pick);
-                        });
-                      }
-                    },
-                  ),
+                decoration: const InputDecoration(
+                  labelText: "Prazo",
+                  border: OutlineInputBorder(),
                 ),
+                onTap: () async {
+                  final pick = await showDatePicker(
+                    context: context,
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime(2100),
+                    initialDate: DateTime.now(),
+                  );
+
+                  if (pick != null) {
+                    setState(() {
+                      _prazoSelecionado = pick;
+                      _prazoCtrl.text = DateFormat("dd/MM/yyyy").format(pick);
+                    });
+                  }
+                },
               ),
-              const SizedBox(height: 10),
+
+              const SizedBox(height: 12),
+
               ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Turmas'),
+                title: const Text("Turmas"),
                 subtitle: Text(
                   _turmasSelecionadas.isEmpty
-                      ? 'Nenhuma turma selecionada'
-                      : '${_turmasSelecionadas.length} selecionada(s)',
+                      ? "Nenhuma turma selecionada"
+                      : "${_turmasSelecionadas.length} selecionada(s)",
                 ),
-                trailing: ElevatedButton.icon(
-                  onPressed: turmasVazias ? null : _selecionarTurmas,
-                  icon: const Icon(Icons.group_add_rounded),
-                  label: const Text('Selecionar'),
+                trailing: ElevatedButton(
+                  onPressed: _turmas.isEmpty ? null : _selecionarTurmas,
+                  child: const Text("Selecionar"),
                 ),
               ),
-              const Divider(height: 24),
-              // Anexos
+
+              const Divider(),
+
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Anexos (opcional)',
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w700),
+                  "Anexos",
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
               ),
-              const SizedBox(height: 8),
+
+              const SizedBox(height: 10),
+
               Wrap(
-                spacing: 8,
-                runSpacing: 8,
+                spacing: 6,
                 children: [
                   for (final f in _arquivosSelecionados)
                     Chip(
-                      label: Text(
-                        f.name.length > 22
-                            ? '${f.name.substring(0, 22)}…'
-                            : f.name,
-                      ),
+                      label: Text(f.name),
                       onDeleted: () {
-                        setState(() {
-                          _arquivosSelecionados.remove(f);
-                        });
+                        setState(() => _arquivosSelecionados.remove(f));
                       },
                     ),
                   OutlinedButton.icon(
                     onPressed: _pickArquivos,
-                    icon: const Icon(Icons.attach_file_rounded),
-                    label: const Text('Adicionar arquivos'),
+                    icon: const Icon(Icons.attach_file),
+                    label: const Text("Adicionar arquivos"),
                   ),
                 ],
               ),
-              const SizedBox(height: 18),
+
+              const SizedBox(height: 20),
+
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: _salvando ? null : _salvar,
                   icon: _salvando
-                      ? const SizedBox(
-                          height: 16,
-                          width: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                      ? const CircularProgressIndicator(strokeWidth: 2)
                       : const Icon(Icons.save),
-                  label: const Text('Salvar atividade'),
+                  label: const Text("Salvar"),
                 ),
               ),
             ],
@@ -406,7 +373,7 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
   }
 
   Future<void> _selecionarTurmas() async {
-    final selecionadas = await showDialog<Set<String>>(
+    final res = await showDialog<Set<String>>(
       context: context,
       builder: (_) => _MultiSelectTurmasDialog(
         turmas: _turmas,
@@ -414,19 +381,24 @@ class _NovaAtividadePageState extends State<NovaAtividadePage> {
       ),
     );
 
-    if (selecionadas != null) {
+    if (res != null) {
       setState(() {
         _turmasSelecionadas
           ..clear()
-          ..addAll(selecionadas);
+          ..addAll(res);
       });
     }
   }
 }
 
+// ---------------------------------------------------------------
+// DIALOG MULTISELECT TURMAS
+// ---------------------------------------------------------------
+
 class _MultiSelectTurmasDialog extends StatefulWidget {
   final List<Map<String, dynamic>> turmas;
   final Set<String> selecionadas;
+
   const _MultiSelectTurmasDialog({
     required this.turmas,
     required this.selecionadas,
@@ -437,25 +409,27 @@ class _MultiSelectTurmasDialog extends StatefulWidget {
       _MultiSelectTurmasDialogState();
 }
 
-class _MultiSelectTurmasDialogState extends State<_MultiSelectTurmasDialog> {
+class _MultiSelectTurmasDialogState
+    extends State<_MultiSelectTurmasDialog> {
   late final Set<String> _temp = {...widget.selecionadas};
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Selecione as turmas'),
+      title: const Text("Selecione as turmas"),
       content: SizedBox(
-        width: 420,
+        width: 400,
         child: ListView.builder(
           shrinkWrap: true,
           itemCount: widget.turmas.length,
           itemBuilder: (_, i) {
             final t = widget.turmas[i];
-            final id = t['id'] as String;
-            final nome = (t['nome'] ?? 'Turma').toString();
-            final marcado = _temp.contains(id);
+            final id = t["id"];
+            final nome = t["nome"] ?? "Turma";
+
             return CheckboxListTile(
-              value: marcado,
+              value: _temp.contains(id),
+              title: Text(nome),
               onChanged: (v) {
                 setState(() {
                   if (v == true) {
@@ -465,19 +439,18 @@ class _MultiSelectTurmasDialogState extends State<_MultiSelectTurmasDialog> {
                   }
                 });
               },
-              title: Text(nome),
             );
           },
         ),
       ),
       actions: [
         TextButton(
+          child: const Text("Cancelar"),
           onPressed: () => Navigator.pop(context, widget.selecionadas),
-          child: const Text('Cancelar'),
         ),
         ElevatedButton(
+          child: const Text("Confirmar"),
           onPressed: () => Navigator.pop(context, _temp),
-          child: const Text('Confirmar'),
         ),
       ],
     );

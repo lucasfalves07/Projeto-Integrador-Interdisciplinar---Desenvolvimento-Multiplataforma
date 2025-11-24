@@ -234,50 +234,61 @@ class _DesempenhoDetalhadoPageState extends State<DesempenhoDetalhadoPage> {
   }
 
   Widget _conteudo() {
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        children: [
-          DropdownButtonFormField<String>(
-            value: turmaSelecionada,
-            decoration: const InputDecoration(
-              labelText: "Turma",
-              border: OutlineInputBorder(),
-            ),
-            items: turmas
-                .map(
-                  (t) => DropdownMenuItem<String>(
-                    value: t["id"],
-                    child: Text(t["nome"] ?? t["id"]),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: turmaSelecionada,
+                  decoration: const InputDecoration(
+                    labelText: "Turma",
+                    border: OutlineInputBorder(),
                   ),
-                )
-                .toList(),
-            onChanged: (v) {
-              setState(() => turmaSelecionada = v);
-              _carregarResumo();
-            },
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              _kpi("Média Geral",
-                  mediaGeral.toStringAsFixed(1), Colors.orange),
-              _kpi("Aprovados", "$totalAprovados", Colors.green),
-              _kpi("Reprovados", "$totalReprovados", Colors.red),
-            ],
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 220,
-            child: NotasHistogram(
-              buckets: _buckets,
-              title: 'Distribuição de médias da turma',
+                  items: turmas
+                      .map(
+                        (t) => DropdownMenuItem<String>(
+                          value: t["id"],
+                          child: Text(t["nome"] ?? t["id"]),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (v) {
+                    setState(() => turmaSelecionada = v);
+                    _carregarResumo();
+                  },
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    _kpi("Média Geral",
+                        mediaGeral.toStringAsFixed(1), Colors.orange),
+                    _kpi("Aprovados", "$totalAprovados", Colors.green),
+                    _kpi("Reprovados", "$totalReprovados", Colors.red),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 220,
+                  child: NotasHistogram(
+                    buckets: _buckets,
+                    title: 'Distribuição de médias da turma',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 260,
+                  child: _graficoResumo(),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 16),
-          Expanded(child: _graficoResumo()),
-        ],
-      ),
+        );
+      },
     );
   }
 

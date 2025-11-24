@@ -1,9 +1,14 @@
-import 'dart:math';
+// ======================================================================
+//  NOTAS_ALUNO.DART — VERSÃO FINAL (IGUAL À TABELA DO PROFESSOR)
+//  - Tabela completa com atividade, nota, peso, máx, disciplina
+//  - Média da disciplina (automática)
+//  - Situação (Aprovado / Recuperação / Reprovado)
+//  - Sincronizado 100% com o banco da Duda
+// ======================================================================
+
+import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import 'package:poliedro_flutter/services/firestore_service.dart';
 
 class NotasAlunoPage extends StatefulWidget {
   const NotasAlunoPage({super.key});
@@ -14,485 +19,262 @@ class NotasAlunoPage extends StatefulWidget {
 
 class _NotasAlunoPageState extends State<NotasAlunoPage> {
   final _auth = FirebaseAuth.instance;
-  final _fs = FirestoreService();
-  final _df = DateFormat('dd/MM/yyyy');
+  final _db = FirebaseFirestore.instance;
 
-  String _filtroDisciplina = 'Todas as disciplinas';
-  String? _erro;
   bool _loading = true;
 
+  String alunoNome = "";
+  String alunoRA = "";
+  String turmaNome = "";
+  String turmaId = "";
+
+  List<Map<String, dynamic>> _atividades = [];
   List<Map<String, dynamic>> _notas = [];
-  Map<String, Map<String, dynamic>> _atividadesById = {};
-  String alunoUid = '';
-  String alunoRA = '';
+
+  Map<String, double> _mediaPorDisciplina = {};
+  Map<String, String> _discSituacao = {};
 
   @override
   void initState() {
     super.initState();
-    _inicializar();
+    _load();
   }
 
-  Future<void> _inicializar() async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) {
-      setState(() {
-        _erro = 'Usuário não autenticado.';
-        _loading = false;
-      });
-      return;
-    }
-
-    alunoUid = uid;
+  // ============================================================
+  //  CARREGA TUDO
+  // ============================================================
+  Future<void> _load() async {
     try {
-      final alunoData = await _fs.getUserByUid(uid);
-      alunoRA = alunoData?['ra'] ?? '';
-      setState(() => _loading = false);
-    } catch (e) {
-      setState(() {
-        _erro = 'Erro ao carregar dados: $e';
-        _loading = false;
-      });
-    }
-  }
+      setState(() => _loading = true);
 
-  Stream<List<Map<String, dynamic>>> _streamNotas() {
-    final firestore = FirebaseFirestore.instance;
-    return firestore
-        .collection('notas')
-        .where('alunoUid', isEqualTo: alunoUid)
-        .snapshots()
-        .asyncMap((snap) async {
-      final notas = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+      final user = _auth.currentUser;
+      if (user == null) throw "Usuário não autenticado.";
 
-      // obtém atividades correspondentes
-      final atvIds =
-          notas.map((e) => e['atividadeId'] as String? ?? '').toSet().toList();
-      final Map<String, Map<String, dynamic>> atividades = {};
+      // user
+      final u = await _db.collection("users").doc(user.uid).get();
+      final ra = (u["ra"] ?? "").toString();
+      final nome = (u["nome"] ?? "").toString();
 
-      for (var i = 0; i < atvIds.length; i += 10) {
-        final fatia = atvIds.sublist(i, min(i + 10, atvIds.length));
-        if (fatia.isEmpty) continue;
+      final turmas = (u["turmas"] as List?)?.map((e) => e.toString()).toList() ?? [];
+      if (turmas.isEmpty) throw "Nenhuma turma vinculada";
 
-        final snapAtv = await firestore
-            .collection('atividades')
-            .where(FieldPath.documentId, whereIn: fatia)
-            .get();
+      final tId = turmas.first;
+      final tSnap = await _db.collection("turmas").doc(tId).get();
+      final tNome = (tSnap["nome"] ?? tId).toString();
 
-        for (var d in snapAtv.docs) {
-          atividades[d.id] = {'id': d.id, ...d.data()};
-        }
+      // atividades dessa turma
+      final atvSnap = await _db
+          .collection("atividades")
+          .where("turmaId", isEqualTo: tId)
+          .get();
+
+      final atividades = atvSnap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+
+      // notas do aluno dessa turma
+      final notasSnap = await _db
+          .collection("notas")
+          .where("alunoRa", isEqualTo: ra)
+          .where("turmaId", isEqualTo: tId)
+          .get();
+
+      final notas = notasSnap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+
+      // calcular médias e situação
+      final mediaDisc = <String, double>{};
+      final situacaoDisc = <String, String>{};
+
+      final group = <String, List<double>>{};
+
+      for (var n in notas) {
+        final atvId = n["atividadeId"];
+        final nota = (n["nota"] as num?)?.toDouble() ?? 0;
+
+        final atv = atividades.firstWhere(
+          (a) => a["id"] == atvId,
+          orElse: () => {},
+        );
+
+        if (atv.isEmpty) continue;
+
+        final discId = atv["disciplinaId"].toString();
+        group.putIfAbsent(discId, () => []);
+        group[discId]!.add(nota);
       }
 
-      _atividadesById = atividades;
-      return notas;
-    });
-  }
-
-  static double _round1(double v) => (v * 10).round() / 10.0;
-
-  double _mediaGeral(List<Map<String, dynamic>> notas) {
-    if (notas.isEmpty) return 0;
-    double soma = 0, somaPesos = 0;
-    for (final n in _filtrarNotasPorDisciplina(notas, null)) {
-      final atv = _atividadesById[n['atividadeId']] ?? {};
-      final peso = ((atv['peso'] ?? 1) as num).toDouble();
-      soma += ((n['nota'] as num?)?.toDouble() ?? 0) * peso;
-      somaPesos += peso;
-    }
-    if (somaPesos == 0) return 0;
-    return _round1(soma / somaPesos);
-  }
-
-  List<Map<String, dynamic>> _filtrarNotasPorDisciplina(
-      List<Map<String, dynamic>> base, String? disc) {
-    final filtradas =
-        base.where((n) => _atividadesById.containsKey(n['atividadeId'])).toList();
-    if (disc == null || disc == 'Todas as disciplinas') return filtradas;
-    return filtradas
-        .where((n) =>
-            (_atividadesById[n['atividadeId']]?['disciplina'] ?? '') == disc)
-        .toList();
-  }
-
-  List<String> _disciplinasDisponiveis() {
-    final set = <String>{};
-    for (final a in _atividadesById.values) {
-      final d = (a['disciplina'] ?? '').toString();
-      if (d.isNotEmpty) set.add(d);
-    }
-    return ['Todas as disciplinas', ...set.toList()..sort()];
-  }
-
-  double _mediaDisciplina(List<Map<String, dynamic>> notas, String disc) {
-    final filtro = _filtrarNotasPorDisciplina(notas, disc);
-    if (filtro.isEmpty) return 0;
-    double soma = 0, somaPesos = 0;
-    for (final n in filtro) {
-      final atv = _atividadesById[n['atividadeId']] ?? {};
-      final peso = ((atv['peso'] ?? 1) as num).toDouble();
-      soma += ((n['nota'] as num?)?.toDouble() ?? 0) * peso;
-      somaPesos += peso;
-    }
-    if (somaPesos == 0) return 0;
-    return _round1(soma / somaPesos);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (_erro != null) {
-      return Scaffold(
-        body: Center(
-          child: Text(_erro!, style: const TextStyle(color: Colors.red)),
-        ),
-      );
-    }
-
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _streamNotas(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
+      group.forEach((discId, lista) {
+        double m = 0;
+        if (lista.isNotEmpty) {
+          m = lista.reduce((a, b) => a + b) / lista.length;
         }
+        mediaDisc[discId] = m;
 
-        if (snapshot.hasError) {
-          return Scaffold(
-            body: Center(
-              child: Text('Erro: ${snapshot.error}',
-                  style: const TextStyle(color: Colors.red)),
-            ),
-          );
+        // situação
+        if (m >= 6) {
+          situacaoDisc[discId] = "Aprovado";
+        } else if (m >= 4) {
+          situacaoDisc[discId] = "Recuperação";
+        } else {
+          situacaoDisc[discId] = "Reprovado";
         }
+      });
 
-        final notas = snapshot.data ?? [];
-        final mediaGeral = _mediaGeral(notas);
-
-        return Scaffold(
-          backgroundColor: Colors.grey[50],
-          body: SafeArea(
-            child: Column(
-              children: [
-                _header(),
-                const SizedBox(height: 12),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: _MediaGeralCard(media: mediaGeral),
-                ),
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: _filtroDisciplinaWidget(),
-                ),
-                const SizedBox(height: 8),
-                Expanded(child: _listaDisciplinas(notas)),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _header() => Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 12, 10),
-        color: Colors.white,
-        child: Row(
-          children: [
-            IconButton(
-              onPressed: () => Navigator.of(context).maybePop(),
-              icon: const Icon(Icons.arrow_back),
-            ),
-            const SizedBox(width: 2),
-            const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Notas e Boletim',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                SizedBox(height: 2),
-                Text('Acompanhe seu desempenho',
-                    style: TextStyle(color: Colors.black54, fontSize: 12)),
-              ],
-            ),
-          ],
-        ),
+      if (!mounted) return;
+      setState(() {
+        alunoNome = nome;
+        alunoRA = ra;
+        turmaId = tId;
+        turmaNome = tNome;
+        _atividades = atividades;
+        _notas = notas;
+        _mediaPorDisciplina = mediaDisc;
+        _discSituacao = situacaoDisc;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Erro: $e")),
       );
-
-  Widget _filtroDisciplinaWidget() {
-    final itens = _disciplinasDisponiveis();
-    if (!itens.contains(_filtroDisciplina)) {
-      _filtroDisciplina = 'Todas as disciplinas';
     }
-    return DropdownButtonFormField<String>(
-      value: _filtroDisciplina,
-      isExpanded: true,
-      items: itens.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-      onChanged: (v) => setState(() => _filtroDisciplina = v ?? 'Todas as disciplinas'),
-      decoration: InputDecoration(
-        filled: true,
-        fillColor: const Color(0xfff7f7fb),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xffe6e6ee)),
-        ),
-      ),
-    );
   }
 
-  Widget _listaDisciplinas(List<Map<String, dynamic>> notas) {
-    final todas = _disciplinasDisponiveis()
-        .where((e) => e != 'Todas as disciplinas')
-        .toList();
-    final mostrar = _filtroDisciplina == 'Todas as disciplinas'
-        ? todas
-        : todas.where((e) => e == _filtroDisciplina).toList();
-
-    if (mostrar.isEmpty) {
-      return const Center(
-          child: Text('Sem notas disponíveis',
-              style: TextStyle(color: Colors.black54)));
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
-      itemCount: mostrar.length,
-      itemBuilder: (context, i) {
-        final disc = mostrar[i];
-        final media = _mediaDisciplina(notas, disc);
-        final filtro = _filtrarNotasPorDisciplina(notas, disc)
-          ..sort((a, b) => (_millis(b['dataLancamento']))
-              .compareTo(_millis(a['dataLancamento'])));
-
-        return _CardDisciplina(
-          disciplina: disc,
-          media: media,
-          children: [
-            for (final n in filtro)
-              _LinhaAtividade(
-                titulo: (_atividadesById[n['atividadeId']]?['titulo'] ??
-                    'Atividade') as String,
-                tipo: (_atividadesById[n['atividadeId']]?['tipo'] ?? 'Prova')
-                    as String,
-                data: _df.format(
-                    DateTime.fromMillisecondsSinceEpoch(_millis(n['dataLancamento']))),
-                peso: ((_atividadesById[n['atividadeId']]?['peso'] ?? 1) as num)
-                    .toInt(),
-                nota: ((n['nota'] as num?)?.toDouble() ?? 0),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  int _millis(dynamic ts) {
-    if (ts is Timestamp) return ts.millisecondsSinceEpoch;
-    if (ts is int) return ts;
-    if (ts is Map && ts['_seconds'] is int) return (ts['_seconds'] as int) * 1000;
-    return DateTime.now().millisecondsSinceEpoch;
-  }
-}
-
-class _MediaGeralCard extends StatelessWidget {
-  final double media;
-  const _MediaGeralCard({required this.media});
-
+  // ============================================================
+  //  TELA
+  // ============================================================
   @override
   Widget build(BuildContext context) {
-    final meta = 7.0;
-    final perc = (media / 10).clamp(0.0, 1.0);
-    final metaPerc = meta / 10;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xffe6e6ee)),
-        borderRadius: BorderRadius.circular(12),
-        gradient: const LinearGradient(
-          colors: [Color(0xfff7fafb), Color(0xfff1f7ff)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Minhas Notas"),
+        centerTitle: true,
+        backgroundColor: Colors.indigo,
       ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _body(),
+    );
+  }
+
+  Widget _body() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
       child: Column(
-        children: [
-          const Text('Média Geral',
-              style: TextStyle(color: Colors.black54, fontSize: 12)),
-          const SizedBox(height: 6),
-          Text(media.toStringAsFixed(1),
-              style: const TextStyle(
-                  fontSize: 36,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xfff57c00))),
-          const SizedBox(height: 10),
-          LayoutBuilder(
-            builder: (context, c) {
-              final w = c.maxWidth;
-              return Stack(
-                children: [
-                  Container(
-                    height: 10,
-                    width: w,
-                    decoration: BoxDecoration(
-                      color: const Color(0xffe8eef9),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                  Container(
-                    height: 10,
-                    width: w * perc,
-                    decoration: BoxDecoration(
-                      color: const Color(0xfff57c00),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                  Positioned(
-                    left: w * metaPerc,
-                    child: Container(
-                      height: 10,
-                      width: 2,
-                      color: Colors.blueAccent,
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: 8),
-          const Text('Meta: 7.0 para aprovação',
-              style: TextStyle(color: Colors.black54, fontSize: 12)),
-        ],
-      ),
-    );
-  }
-}
-
-class _CardDisciplina extends StatelessWidget {
-  final String disciplina;
-  final double media;
-  final List<Widget> children;
-
-  const _CardDisciplina({
-    required this.disciplina,
-    required this.media,
-    required this.children,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xffe6e6ee)),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-            child: Row(
-              children: [
-                Expanded(
-                    child: Text(disciplina,
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700))),
-                Text(media.toStringAsFixed(1),
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.w800)),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          ...children,
-        ],
-      ),
-    );
-  }
-}
-
-class _LinhaAtividade extends StatelessWidget {
-  final String titulo;
-  final String tipo;
-  final String data;
-  final int peso;
-  final double nota;
-
-  const _LinhaAtividade({
-    required this.titulo,
-    required this.tipo,
-    required this.data,
-    required this.peso,
-    required this.nota,
-  });
-
-  Color get _notaColor {
-    if (nota >= 8) return Colors.green;
-    if (nota >= 6) return const Color(0xfff57c00);
-    return Colors.red;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-      decoration: const BoxDecoration(
-        color: Color(0xfffcfbff),
-        border: Border(bottom: BorderSide(color: Color(0xffeeeeef))),
-      ),
-      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(titulo,
-                    style: const TextStyle(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 6,
-                  children: [
-                    _chip(data),
-                    _chip(tipo),
-                    _chip('Peso $peso'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            nota.toStringAsFixed(1),
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w800,
-              color: _notaColor,
-            ),
-          ),
+          _headerCard(),
+          const SizedBox(height: 20),
+          _tabelaNotasAluno(),
         ],
       ),
     );
   }
 
-  Widget _chip(String text) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: const Color(0xffe6e6ee)),
-          borderRadius: BorderRadius.circular(999),
+  // ============================================================
+  //  CARD DO ALUNO
+  // ============================================================
+  Widget _headerCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 28,
+              backgroundColor: Colors.indigo.shade100,
+              child: const Icon(Icons.person, size: 40, color: Colors.indigo),
+            ),
+            const SizedBox(width: 16),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  alunoNome,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text("RA: $alunoRA", style: const TextStyle(color: Colors.black54)),
+                Text(turmaNome, style: const TextStyle(color: Colors.black54)),
+              ],
+            ),
+          ],
         ),
-        child: Text(
-          text,
-          style: const TextStyle(fontSize: 12, color: Colors.black87),
-        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  //  TABELA IGUAL DO PROFESSOR
+  // ============================================================
+  Widget _tabelaNotasAluno() {
+    if (_atividades.isEmpty) {
+      return const Center(
+        child: Text("Nenhuma atividade cadastrada."),
       );
+    }
+
+    return DataTable(
+      columns: const [
+        DataColumn(label: Text("Atividade")),
+        DataColumn(label: Text("Nota")),
+        DataColumn(label: Text("Peso")),
+        DataColumn(label: Text("Máx")),
+        DataColumn(label: Text("Disciplina")),
+        DataColumn(label: Text("Média")),
+        DataColumn(label: Text("Situação")),
+      ],
+      rows: _atividades.map((a) {
+        final nota = _notas.firstWhere(
+          (n) => n["atividadeId"] == a["id"],
+          orElse: () => {},
+        );
+
+        final valor = nota.isEmpty ? null : (nota["nota"] as num?)?.toDouble();
+        final notaTxt = valor == null ? "-" : valor.toStringAsFixed(1);
+
+        final peso = (a["peso"] as num?)?.toDouble() ?? 1;
+        final max = (a["max"] as num?)?.toDouble() ?? 10;
+
+        final discNome = (a["disciplinaNome"] ?? "-").toString();
+        final discId = a["disciplinaId"].toString();
+
+        final media = _mediaPorDisciplina[discId] ?? 0;
+        final situacao = _discSituacao[discId] ?? "-";
+
+        return DataRow(
+          cells: [
+            DataCell(Text(a["titulo"] ?? "Atividade")),
+            DataCell(Text(
+              notaTxt,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: valor == null
+                    ? Colors.grey
+                    : valor >= 6
+                        ? Colors.green
+                        : Colors.red,
+              ),
+            )),
+            DataCell(Text(peso.toString())),
+            DataCell(Text(max.toString())),
+            DataCell(Text(discNome)),
+            DataCell(Text(media.toStringAsFixed(1))),
+            DataCell(Text(
+              situacao,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: situacao == "Aprovado"
+                    ? Colors.green
+                    : situacao == "Recuperação"
+                        ? Colors.orange
+                        : Colors.red,
+              ),
+            )),
+          ],
+        );
+      }).toList(),
+    );
+  }
 }

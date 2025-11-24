@@ -1,94 +1,84 @@
-﻿import 'package:flutter/material.dart';
+﻿// ===============================================================
+// Dashboard Professor — VERSÃO FINAL + ADICIONADO CARD DE DESEMPENHO
+// ===============================================================
+
+import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:go_router/go_router.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:poliedro_flutter/services/firestore_service.dart';
+import 'package:go_router/go_router.dart';
 
 class DashboardProfessorPage extends StatefulWidget {
   const DashboardProfessorPage({super.key});
 
   @override
-  State<DashboardProfessorPage> createState() =>
-      _DashboardProfessorPageState();
+  State<DashboardProfessorPage> createState() => _DashboardProfessorPageState();
 }
 
 class _DashboardProfessorPageState extends State<DashboardProfessorPage> {
-  final FirestoreService _firestoreService = FirestoreService();
-  final User? currentUser = FirebaseAuth.instance.currentUser;
+  final User? user = FirebaseAuth.instance.currentUser;
 
-  String professorName = "Carregando...";
+  String professorNome = "Carregando...";
   List<Map<String, dynamic>> turmas = [];
-  List<Map<String, dynamic>> atividades = [];
-  List<Map<String, dynamic>> materiais = [];
-  List<Map<String, dynamic>> mensagens = [];
-  double mediaGeral = 0.0;
 
-  bool isLoading = true;
-  int selectedTab = 0;
+  int countAlunos = 0;
+  int countAtividades = 0;
+  int countMateriais = 0;
+  int countMensagens = 0;
+
+  bool loading = true;
 
   @override
   void initState() {
     super.initState();
-    _carregarDados();
+    _bootstrap();
   }
 
-  /// Carrega todas as informações do professor
-  Future<void> _carregarDados() async {
-    if (currentUser == null) return;
+  // ===========================================================
+  // BOOTSTRAP — CARREGA TUDO
+  // ===========================================================
+  Future<void> _bootstrap() async {
+    if (user == null) return;
 
     try {
-      final userData = await _firestoreService.getUserByUid(currentUser!.uid);
-      professorName = userData?["nome"] ?? "Professor(a)";
+      final db = FirebaseFirestore.instance;
 
-      turmas =
-          await _firestoreService.listarTurmasDoProfessor(currentUser!.uid);
-
-      atividades.clear();
-      materiais.clear();
-      mensagens.clear();
-      double somaMedias = 0;
-      int contadorTurmas = 0;
-
-      for (var turma in turmas) {
-        final turmaId = turma["id"];
-
-        // Atividades
-        final listaAtividades =
-            await _firestoreService.buscarAtividadesPorTurma(turmaId);
-        atividades.addAll(listaAtividades);
-
-        // Materiais
-        final listaMateriais =
-            await _firestoreService.listarMateriaisPorTurma(turmaId);
-        materiais.addAll(listaMateriais);
-
-        // Mensagens
-        final listaMensagens = await _buscarMensagensPorTurma(turmaId);
-        mensagens.addAll(listaMensagens);
-
-        // Calcular média geral da turma (com base nas notas)
-        final notasSnap = await FirebaseFirestore.instance
-            .collection("notas")
-            .where("professorId", isEqualTo: currentUser!.uid)
+      // -------- 1. BUSCAR NOME DO USERS --------
+      final userSnap = await db.collection("users").doc(user!.uid).get();
+      if (userSnap.exists) {
+        professorNome = userSnap.data()?["nome"] ?? "Professor(a)";
+      } else {
+        // -------- 2. SE USERS NAO EXISTE, PEGAR PELA DISCIPLINA --------
+        final discSnap = await db
+            .collection("disciplinas")
+            .where("professorId", isEqualTo: user!.uid)
+            .limit(1)
             .get();
 
-        if (notasSnap.docs.isNotEmpty) {
-          double soma = 0;
-          for (var n in notasSnap.docs) {
-            soma += (n.data()["nota"] ?? 0).toDouble();
-          }
-          somaMedias += soma / notasSnap.docs.length;
-          contadorTurmas++;
+        if (discSnap.docs.isNotEmpty) {
+          professorNome =
+              discSnap.docs.first.data()["professor"] ?? "Professor(a)";
         }
       }
 
-      mediaGeral =
-          contadorTurmas == 0 ? 0 : (somaMedias / contadorTurmas).toDouble();
+      // -------- TURMAS DO PROFESSOR --------
+      final turmaSnap = await db
+          .collection("turmas")
+          .where("professorId", isEqualTo: user!.uid)
+          .get();
 
-      if (mounted) setState(() => isLoading = false);
+      turmas = turmaSnap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+      final turmaIds = turmas.map((e) => e["id"].toString()).toList();
+
+      // -------- CONTADORES --------
+      countAlunos = await _contarAlunos(turmaIds);
+      countAtividades = await _contarAtividades(turmaIds);
+      countMateriais = await _contarMateriais(turmas);
+      countMensagens = await _contarMensagens(turmaIds);
+
+      if (mounted) setState(() => loading = false);
     } catch (e) {
       if (mounted) {
-        setState(() => isLoading = false);
+        setState(() => loading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Erro ao carregar dados: $e")),
         );
@@ -96,249 +86,364 @@ class _DashboardProfessorPageState extends State<DashboardProfessorPage> {
     }
   }
 
-  /// Busca mensagens no Firestore (fallback local)
-  Future<List<Map<String, dynamic>>> _buscarMensagensPorTurma(
-      String turmaId) async {
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection("mensagens")
-          .where("turmaId", isEqualTo: turmaId)
-          .orderBy("timestamp", descending: true)
-          .limit(20)
+  // ===========================================================
+  // ALUNOS
+  // ===========================================================
+  Future<int> _contarAlunos(List<String> turmaIds) async {
+    if (turmaIds.isEmpty) return 0;
+    final db = FirebaseFirestore.instance;
+
+    final snap = await db
+        .collection("alunos")
+        .where("turmaId", whereIn: turmaIds)
+        .get();
+
+    return snap.docs.length;
+  }
+
+  // ===========================================================
+  // ATIVIDADES
+  // ===========================================================
+  Future<int> _contarAtividades(List<String> turmaIds) async {
+    if (turmaIds.isEmpty) return 0;
+    final db = FirebaseFirestore.instance;
+    int total = 0;
+
+    for (var i = 0; i < turmaIds.length; i += 10) {
+      final slice =
+          turmaIds.sublist(i, (i + 10 > turmaIds.length) ? turmaIds.length : i + 10);
+
+      final snap = await db
+          .collection("atividades")
+          .where("turmaId", whereIn: slice)
           .get();
 
-      return snapshot.docs
-          .map((d) => {"id": d.id, ...d.data() as Map<String, dynamic>})
-          .toList();
-    } catch (e) {
-      debugPrint("Erro ao buscar mensagens: $e");
-      return [];
+      total += snap.docs.length;
+    }
+
+    return total;
+  }
+
+  // ===========================================================
+  // MATERIAIS
+  // ===========================================================
+  Future<int> _contarMateriais(List<Map<String, dynamic>> turmasDoProfessor) async {
+    if (turmasDoProfessor.isEmpty) return 0;
+    final db = FirebaseFirestore.instance;
+
+    int total = 0;
+    final disciplinaIds = <String>{};
+
+    for (final turma in turmasDoProfessor) {
+      final lista = (turma["disciplinas"] as List?) ?? [];
+      for (final d in lista) {
+        final id = (d["id"] ?? "").toString();
+        if (id.isNotEmpty) disciplinaIds.add(id);
+      }
+    }
+
+    for (final discId in disciplinaIds) {
+      try {
+        final matsDiretos = await db
+            .collection("disciplinas")
+            .doc(discId)
+            .collection("materiais")
+            .get();
+        total += matsDiretos.docs.length;
+
+        final topicosSnap = await db
+            .collection("disciplinas")
+            .doc(discId)
+            .collection("topicos")
+            .get();
+
+        for (final t in topicosSnap.docs) {
+          final mats = await t.reference.collection("materiais").get();
+          total += mats.docs.length;
+        }
+      } catch (_) {}
+    }
+
+    return total;
+  }
+
+  // ===========================================================
+  // MENSAGENS
+  // ===========================================================
+  Future<int> _contarMensagens(List<String> turmaIds) async {
+    if (turmaIds.isEmpty || user == null) return 0;
+
+    try {
+      final db = FirebaseFirestore.instance;
+      final professorId = user!.uid;
+      final turmaSet = turmaIds.toSet();
+
+      final snap = await db
+          .collection("threads")
+          .where("participantes", arrayContains: professorId)
+          .get();
+
+      int total = 0;
+
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final t = (data["turmaId"] ?? "").toString();
+        if (turmaSet.contains(t)) total++;
+      }
+
+      return total;
+    } catch (_) {
+      return 0;
     }
   }
 
+  // ===========================================================
+  // BUILD
+  // ===========================================================
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final width = MediaQuery.of(context).size.width;
-    int crossAxisCount = 1;
-    if (width >= 1200) {
-      crossAxisCount = 4;
-    } else if (width >= 800) {
-      crossAxisCount = 3;
-    } else if (width >= 600) {
-      crossAxisCount = 2;
-    }
 
-    final dashboardCards = [
-      {
-        "title": "Minhas Turmas",
-        "description": "Gerencie suas turmas e alunos",
-        "icon": Icons.group,
-        "color": Colors.cyan,
-        "count": "${turmas.length} turmas",
-        "action": () => context.push('/turmas'),
-      },
-      {
-        "title": "Materiais",
-        "description": "Envie e organize materiais por turma",
-        "icon": Icons.description,
-        "color": Colors.orange,
-        "count": "${materiais.length} materiais",
-        "action": () => context.push('/materiais'),
-      },
-      {
-        "title": "Atividades e Notas",
-        "description": "Cadastre atividades e lance notas",
-        "icon": Icons.school,
-        "color": Colors.pink,
-        "count": "${atividades.length} atividades",
-        "action": () => context.push('/atividades'),
-      },
-      {
-        "title": "Mensagens",
-        "description": "Envie e receba mensagens com alunos",
-        "icon": Icons.message,
-        "color": Colors.blue,
-        "count": "${mensagens.length} recentes",
-        "action": () => context.push('/mensagens'),
-      },
-      {
-        "title": "Desempenho das Turmas",
-        "description": "Média geral das notas lançadas",
-        "icon": Icons.bar_chart_rounded,
-        "color": Colors.green,
-        "count": "${mediaGeral.toStringAsFixed(1)} média",
-        "action": () => context.push('/atividades'),
-      },
-    ];
-
-    return Scaffold(
-      backgroundColor: theme.colorScheme.surface,
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                _buildHeader(theme),
-                Expanded(
-                  child: RefreshIndicator(
-                    onRefresh: _carregarDados,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Scaffold(
+          backgroundColor: theme.scaffoldBackgroundColor,
+          body: loading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: _bootstrap,
+                  child: SizedBox.expand(
                     child: SingleChildScrollView(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildQuickTabs(theme),
-                          const SizedBox(height: 20),
-                          GridView.builder(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: dashboardCards.length,
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: crossAxisCount,
-                              childAspectRatio: 1.2,
-                              crossAxisSpacing: 14,
-                              mainAxisSpacing: 14,
-                            ),
-                            itemBuilder: (context, i) {
-                              final card = dashboardCards[i];
-                              return _buildDashboardCard(theme, card);
-                            },
+                      scrollDirection: Axis.horizontal,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: constraints.maxWidth,
+                          maxWidth: constraints.maxWidth,
+                        ),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.vertical,
+                          child: Column(
+                            children: [
+                              _header(context),
+                              _tabs(context),
+                              Padding(
+                                padding: const EdgeInsets.all(18),
+                                child: _grid(context),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ],
-            ),
+        );
+      },
     );
   }
 
-  // ------------------------ HEADER ------------------------
-  Widget _buildHeader(ThemeData theme) {
+  // ===========================================================
+  // HEADER
+  // ===========================================================
+  Widget _header(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
       decoration: BoxDecoration(
-        color: theme.cardColor,
+        color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
             blurRadius: 6,
             offset: const Offset(0, 2),
+            color: Colors.black.withOpacity(0.06),
           )
         ],
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Row(
-            children: [
-              Image.asset("assets/poliedro-logo.png", height: 40),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Bem-vindo, $professorName",
-                    style: theme.textTheme.titleLarge,
+          Flexible(
+            child: Row(
+              children: [
+                Image.asset("assets/poliedro-logo.png", height: 38),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Bem-vindo(a), Prof. $professorNome",
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Painel do Professor",
+                        style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                      ),
+                    ],
                   ),
-                  const Text(
-                    "Dashboard do Professor",
-                    style: TextStyle(fontSize: 14, color: Colors.grey),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          Row(
-            children: [
-              TextButton.icon(
-                onPressed: () => context.push('/configuracoes'),
-                icon: const Icon(Icons.settings, size: 18),
-                label: const Text("Configurações"),
-                style: TextButton.styleFrom(
-                  foregroundColor: theme.colorScheme.onSurface,
                 ),
-              ),
-              const SizedBox(width: 8),
-              TextButton.icon(
-                onPressed: () async {
-                  await FirebaseAuth.instance.signOut();
-                  if (mounted) context.go('/login');
-                },
-                icon: const Icon(Icons.logout, size: 18),
-                label: const Text("Sair"),
-                style:
-                    TextButton.styleFrom(foregroundColor: Colors.redAccent),
-              ),
-            ],
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => context.push("/configuracoes"),
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              if (!mounted) return;
+              context.go("/login");
+            },
           ),
         ],
       ),
     );
   }
 
-  // ------------------------ QUICK MENU ------------------------
-  Widget _buildQuickTabs(ThemeData theme) {
-    return Row(
-      children: [
-        _buildTabButton("Turmas", Icons.class_, 0, '/turmas', theme),
-        const SizedBox(width: 8),
-        _buildTabButton("Materiais", Icons.description, 1, '/materiais', theme),
-        const SizedBox(width: 8),
-        _buildTabButton("Atividades", Icons.school, 2, '/atividades', theme),
-        const SizedBox(width: 8),
-        _buildTabButton("Mensagens", Icons.message, 3, '/mensagens', theme),
-      ],
+  // ===========================================================
+  // TABS
+  // ===========================================================
+  Widget _tabs(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Colors.black12)),
+      ),
+      child: Wrap(
+        spacing: 8,
+        children: [
+          _tab("Dashboard", selected: true, onTap: () {}),
+          _tab("Turmas", onTap: () => context.push("/turmas")),
+          _tab("Alunos", onTap: () => context.push("/alunos")),
+        ],
+      ),
     );
   }
 
-  Widget _buildTabButton(
-      String text, IconData icon, int index, String route, ThemeData theme) {
-    final isSelected = selectedTab == index;
-    return Expanded(
-      child: TextButton.icon(
-        onPressed: () {
-          setState(() => selectedTab = index);
-          context.push(route);
-        },
-        icon: Icon(icon,
-            color: isSelected
-                ? Colors.white
-                : theme.colorScheme.onSurface.withOpacity(0.8)),
-        label: Text(
-          text,
-          style: TextStyle(
-            color: isSelected
-                ? Colors.white
-                : theme.colorScheme.onSurface.withOpacity(0.9),
-          ),
-        ),
-        style: TextButton.styleFrom(
-          backgroundColor:
-              isSelected ? Colors.orange : theme.colorScheme.surfaceContainer,
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+  Widget _tab(String label,
+      {bool selected = false, required VoidCallback onTap}) {
+    return TextButton(
+      onPressed: onTap,
+      style: TextButton.styleFrom(
+        backgroundColor: selected ? Colors.blue.withOpacity(0.14) : null,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+          color: Colors.black87,
         ),
       ),
     );
   }
 
-  // ------------------------ CARD ------------------------
-  Widget _buildDashboardCard(ThemeData theme, Map<String, dynamic> card) {
+  // ===========================================================
+  // GRID + CARD DE DESEMPENHO ADICIONADO
+  // ===========================================================
+  Widget _grid(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final cross = width >= 1100 ? 3 : width >= 750 ? 2 : 1;
+
+    return GridView(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: cross,
+        crossAxisSpacing: 18,
+        mainAxisSpacing: 18,
+        childAspectRatio: 1.8,
+      ),
+      children: [
+        _card(
+          color: Colors.teal,
+          icon: Icons.group,
+          title: "Minhas Turmas",
+          subtitle: "Gerencie suas turmas",
+          topRight: "${turmas.length} turmas",
+          onTap: () => context.push("/turmas"),
+        ),
+        _card(
+          color: Colors.purple,
+          icon: Icons.people,
+          title: "Alunos",
+          subtitle: "Total de alunos",
+          topRight: "$countAlunos alunos",
+          onTap: () => context.push("/alunos"),
+        ),
+        _card(
+          color: Colors.orange,
+          icon: Icons.description,
+          title: "Materiais",
+          subtitle: "Conteúdos enviados",
+          topRight: "$countMateriais materiais",
+          onTap: () => context.push("/materiais"),
+        ),
+        _card(
+          color: Colors.pink,
+          icon: Icons.assignment,
+          title: "Atividades",
+          subtitle: "Provas e tarefas",
+          topRight: "$countAtividades atividades",
+          onTap: () => context.push("/atividades"),
+        ),
+        _card(
+          color: Colors.green,
+          icon: Icons.edit_note,
+          title: "Lançar Notas",
+          subtitle: "Notas e médias",
+          topRight: "${turmas.length} turmas",
+          onTap: () => context.push("/tabela_notas"),
+        ),
+        _card(
+          color: Colors.blue,
+          icon: Icons.chat_bubble_outline,
+          title: "Mensagens",
+          subtitle: "Interaja com alunos",
+          topRight: "$countMensagens recentes",
+          onTap: () => context.push("/mensagens"),
+        ),
+
+        // ================================================
+        // 🎉 NOVO CARD ADICIONADO — DESEMPENHO DETALHADO
+        // ================================================
+        _card(
+          color: Colors.indigo,
+          icon: Icons.bar_chart,
+          title: "Desempenho",
+          subtitle: "Médias e análises",
+          topRight: "Módulo",
+          onTap: () => context.push("/desempenho_detalhado_page"),
+        ),
+      ],
+    );
+  }
+
+  // ===========================================================
+  // CARD
+  // ===========================================================
+  Widget _card({
+    required Color color,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required String topRight,
+    required VoidCallback onTap,
+  }) {
     return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: card["action"] as void Function(),
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
       child: Card(
-        color: theme.cardColor,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         elevation: 2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -346,35 +451,35 @@ class _DashboardProfessorPageState extends State<DashboardProfessorPage> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Container(
-                    padding: const EdgeInsets.all(10),
+                    padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: card["color"] as Color,
-                      borderRadius: BorderRadius.circular(8),
+                      color: color,
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(
-                      card["icon"] as IconData,
-                      color: Colors.white,
-                      size: 22,
-                    ),
+                    child: Icon(icon, color: Colors.white, size: 24),
                   ),
-                  Text(
-                    card["count"] as String,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: Colors.grey),
+                  Flexible(
+                    child: Text(
+                      topRight,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.grey.shade700,
+                        fontSize: 13,
+                      ),
+                    ),
                   ),
                 ],
               ),
-              const Spacer(),
+              const SizedBox(height: 14),
               Text(
-                card["title"] as String,
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold),
+                title,
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
               const SizedBox(height: 6),
               Text(
-                card["description"] as String,
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: Colors.grey.shade600),
+                subtitle,
+                style: TextStyle(color: Colors.black54, fontSize: 13),
               ),
             ],
           ),

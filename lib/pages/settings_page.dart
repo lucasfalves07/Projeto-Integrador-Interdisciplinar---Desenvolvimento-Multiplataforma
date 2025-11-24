@@ -1,4 +1,3 @@
-// lib/pages/settings_page.dart
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:provider/provider.dart';
@@ -19,24 +18,23 @@ class _SettingsPageState extends State<SettingsPage>
 
   late final TabController _tabController;
 
-  // ---------------- Perfil
+  // ---------------- Perfil ----------------
   final _nomeCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _telCtrl = TextEditingController();
   String _formatoData = 'DD/MM/AAAA';
 
-  // ---------------- Notificações
+  // ---------------- Notificações ----------------
   bool _notifEntregaAtividades = true;
   bool _notifMensagens = true;
   bool _notifLeitura = false;
   bool _notifFalhaUpload = true;
 
-  // ---------------- Segurança
-  final _senhaAtualCtrl = TextEditingController();
+  // ---------------- Segurança ----------------
   final _novaSenhaCtrl = TextEditingController();
   final _confirmaSenhaCtrl = TextEditingController();
 
-  // ---------------- Sobre
+  // ---------------- Sobre ----------------
   String _versao = '2.5.0';
   String _ultimaAtualizacao = '15 de março de 2024';
 
@@ -55,7 +53,6 @@ class _SettingsPageState extends State<SettingsPage>
     _nomeCtrl.dispose();
     _emailCtrl.dispose();
     _telCtrl.dispose();
-    _senhaAtualCtrl.dispose();
     _novaSenhaCtrl.dispose();
     _confirmaSenhaCtrl.dispose();
     super.dispose();
@@ -68,6 +65,7 @@ class _SettingsPageState extends State<SettingsPage>
     try {
       if (_currentUser != null) {
         final u = await _firestore.getUserByUid(_currentUser!.uid);
+
         _nomeCtrl.text =
             (u?['nome'] ?? _currentUser!.displayName ?? '').toString();
         _emailCtrl.text = _currentUser!.email ?? (u?['email'] ?? '');
@@ -76,6 +74,7 @@ class _SettingsPageState extends State<SettingsPage>
         final fmt = u?['dateFormat'] ?? u?['formatoData'];
         if (fmt != null) _formatoData = fmt.toString().toUpperCase();
 
+        // 🔸 Preferências de notificação
         final prefs = await _firestore.getNotificationPrefs(_currentUser!.uid);
         if (prefs != null) {
           _notifEntregaAtividades =
@@ -85,10 +84,11 @@ class _SettingsPageState extends State<SettingsPage>
           _notifFalhaUpload = prefs['uploadFailures'] ?? _notifFalhaUpload;
         }
 
+        // 🔸 Metadados do app (versão e atualização)
         final meta = await _firestore.getAppMeta();
-        _versao = (meta['version'] ?? _versao).toString();
+        _versao = meta?['version']?.toString() ?? _versao;
         _ultimaAtualizacao =
-            (meta['lastUpdate'] ?? _ultimaAtualizacao).toString();
+            meta?['lastUpdate']?.toString() ?? _ultimaAtualizacao;
       }
     } catch (e) {
       _toast('Erro ao carregar configurações: $e', error: true);
@@ -102,6 +102,7 @@ class _SettingsPageState extends State<SettingsPage>
   // ============================================================
   Future<void> _salvarPerfil(ThemeController themeController) async {
     if (_currentUser == null) return;
+    _showLoading();
     try {
       await _currentUser!.updateDisplayName(_nomeCtrl.text.trim());
       await _firestore.updateUserProfile(_currentUser!.uid, {
@@ -109,40 +110,47 @@ class _SettingsPageState extends State<SettingsPage>
         'telefone': _telCtrl.text.trim(),
         'theme': themeController.isDarkMode ? 'dark' : 'light',
         'dateFormat': _formatoData,
+        'updatedAt': DateTime.now().toIso8601String(),
       });
       _toast('Alterações de perfil salvas!');
     } catch (e) {
       _toast('Falha ao salvar perfil: $e', error: true);
+    } finally {
+      Navigator.of(context).pop();
     }
   }
 
   Future<void> _salvarNotificacoes() async {
     if (_currentUser == null) return;
+    _showLoading();
     try {
       await _firestore.updateNotificationPrefs(_currentUser!.uid, {
         'activityDelivery': _notifEntregaAtividades,
         'messages': _notifMensagens,
         'readReceipt': _notifLeitura,
         'uploadFailures': _notifFalhaUpload,
+        'updatedAt': DateTime.now().toIso8601String(),
       });
       _toast('Preferências de notificações salvas!');
     } catch (e) {
       _toast('Falha ao salvar notificações: $e', error: true);
+    } finally {
+      Navigator.of(context).pop();
     }
   }
 
   Future<void> _alterarSenha() async {
-    final nova = _novaSenhaCtrl.text;
-    final conf = _confirmaSenhaCtrl.text;
+    final nova = _novaSenhaCtrl.text.trim();
+    final conf = _confirmaSenhaCtrl.text.trim();
 
     if (nova.isEmpty || conf.isEmpty || nova != conf) {
       _toast('Nova senha e confirmação não coincidem.', error: true);
       return;
     }
 
+    _showLoading();
     try {
       await _currentUser?.updatePassword(nova);
-      _senhaAtualCtrl.clear();
       _novaSenhaCtrl.clear();
       _confirmaSenhaCtrl.clear();
       _toast('Senha alterada com sucesso!');
@@ -152,32 +160,48 @@ class _SettingsPageState extends State<SettingsPage>
         'Por segurança, faça login novamente e tente de novo.',
         error: true,
       );
+    } finally {
+      Navigator.of(context).pop();
     }
   }
 
   Future<void> _exportarDados() async {
     if (_currentUser == null) return;
+    _showLoading();
     try {
       final dump = await _firestore.exportarDadosDoUsuario(_currentUser!.uid);
       _toast('Exportação concluída (${dump.keys.length} coleções).');
     } catch (e) {
       _toast('Falha ao exportar dados: $e', error: true);
+    } finally {
+      Navigator.of(context).pop();
     }
   }
 
   Future<void> _limparRascunhos() async {
     if (_currentUser == null) return;
+    _showLoading();
     try {
       final removidos = await _firestore.limparRascunhos(_currentUser!.uid);
       _toast('Rascunhos removidos: $removidos');
     } catch (e) {
       _toast('Falha ao limpar rascunhos: $e', error: true);
+    } finally {
+      Navigator.of(context).pop();
     }
   }
 
   // ============================================================
   // 🔹 Utilitários
   // ============================================================
+  void _showLoading() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+  }
+
   void _toast(String msg, {bool error = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -234,8 +258,10 @@ class _SettingsPageState extends State<SettingsPage>
       appBar: AppBar(
         elevation: 0,
         backgroundColor: isDark ? Colors.grey[850] : Colors.white,
-        title: Text('Configurações',
-            style: TextStyle(color: isDark ? Colors.white : Colors.black)),
+        title: Text(
+          'Configurações',
+          style: TextStyle(color: isDark ? Colors.white : Colors.black),
+        ),
         iconTheme: IconThemeData(color: isDark ? Colors.white : Colors.black),
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(56),
@@ -313,6 +339,20 @@ class _SettingsPageState extends State<SettingsPage>
                 },
                 decoration: const InputDecoration(labelText: 'Tema'),
               ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: _formatoData,
+              decoration: const InputDecoration(labelText: 'Formato de data'),
+              items: const [
+                DropdownMenuItem(value: 'DD/MM/AAAA', child: Text('DD/MM/AAAA')),
+                DropdownMenuItem(value: 'MM/DD/YYYY', child: Text('MM/DD/YYYY')),
+                DropdownMenuItem(value: 'YYYY-MM-DD', child: Text('YYYY-MM-DD')),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                setState(() => _formatoData = v);
+              },
             ),
             const SizedBox(height: 12),
             Align(

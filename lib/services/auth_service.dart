@@ -2,12 +2,17 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+/// =============================================================================
+/// 🔐 AuthService — autenticação, sessão e sincronização com Firestore
+/// =============================================================================
 class AuthService {
-  // Singleton (mantém cache global de autenticação e role)
+  // ---------------------------------------------------------------------------
+  // Singleton
+  // ---------------------------------------------------------------------------
   AuthService._internal() {
     _auth.authStateChanges().listen((user) {
       if (user == null) {
-        currentRole.value = null; // limpa cache ao sair
+        currentRole.value = null;
       } else {
         _loadAndCacheUserRole(user.uid);
       }
@@ -20,146 +25,206 @@ class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  /// Cache reativo do papel do usuário logado: 'aluno' | 'professor' | null
+  /// Perfil: aluno / professor / admin
   final ValueNotifier<String?> currentRole = ValueNotifier<String?>(null);
 
-  /// Usuário logado atualmente
   User? get currentUser => _auth.currentUser;
-
-  /// Stream de mudanças de login/logout
   Stream<User?> get authStateChanges => _auth.authStateChanges();
 
-  // ---------------------------------------------------------------------------
-  // LOGIN / CADASTRO
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // LOGIN E CADASTRO
+  // =============================================================================
 
-  /// Login com e-mail e senha
-  Future<User?> signInWithEmailAndPassword(
-    String email,
-    String password,
-  ) async {
+  /// Login: aceita **email** ou **RA**
+  Future<User?> signIn(String login, String password) async {
     try {
+      String email = login.trim();
+
+      // RA → converte para email
+      if (!login.contains('@')) {
+        final q = await _db
+            .collection('users')
+            .where('ra', isEqualTo: login.trim())
+            .limit(1)
+            .get();
+
+        if (q.docs.isEmpty) throw Exception('RA não encontrado.');
+
+        email = q.docs.first.data()['email'] ?? "";
+        if (email.isEmpty) throw Exception('E-mail não associado ao RA.');
+      }
+
+      // Firebase login
       final credential = await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
+
       final user = credential.user;
       if (user != null) {
         await _ensureUserDoc(user);
         await _loadAndCacheUserRole(user.uid);
       }
+
       return user;
     } on FirebaseAuthException catch (e) {
       throw Exception(_mapFirebaseError(e));
     }
   }
 
-  /// Cadastro com e-mail e senha
-  /// Padrão: cria conta com tipo = 'aluno' (pode ser sobrescrito)
+  /// Cadastro padrão (aluno)
+  Future<User?> signUp({
+    required String email,
+    required String password,
+    String tipoDefault = 'aluno',
+    String? nome,
+    String? ra,
+    List<String>? turmasDefault,
+  }) async {
+    try {
+      final credential = await _auth.createUserWithEmailAndPassword(
+        email: email.trim(),
+        password: password.trim(),
+      );
+
+      final user = credential.user;
+
+      if (user != null) {
+        await _ensureUserDoc(
+          user,
+          tipoDefault: tipoDefault,
+          nome: nome,
+          ra: ra,
+          turmasDefault: turmasDefault,
+        );
+        currentRole.value = tipoDefault.toLowerCase().trim();
+      }
+
+      return user;
+    } on FirebaseAuthException catch (e) {
+      throw Exception(_mapFirebaseError(e));
+    }
+  }
+
+  // Alias para compatibilidade
+  Future<User?> signInWithEmailAndPassword(String email, String password) =>
+      signIn(email, password);
+
   Future<User?> signUpWithEmailAndPassword(
     String email,
     String password, {
     String tipoDefault = 'aluno',
-  }) async {
-    try {
-      final credential = await _auth.createUserWithEmailAndPassword(
+    List<String>? turmasDefault,
+  }) =>
+      signUp(
         email: email,
         password: password,
+        tipoDefault: tipoDefault,
+        turmasDefault: turmasDefault,
       );
-      final user = credential.user;
-      if (user != null) {
-        await _ensureUserDoc(user, tipoDefault: tipoDefault);
-        currentRole.value = tipoDefault.toLowerCase();
-      }
-      return user;
-    } on FirebaseAuthException catch (e) {
-      throw Exception(_mapFirebaseError(e));
-    }
-  }
 
-  /// Garante que exista um doc em `users/{uid}` e mantém campos essenciais atualizados
+  // =============================================================================
+  // FIRESTORE SYNC
+  // =============================================================================
+
+  /// Garante que o documento users/{uid} exista e esteja atualizado
   Future<void> _ensureUserDoc(
     User user, {
     String tipoDefault = 'aluno',
+    String? nome,
+    String? ra,
+    List<String>? turmasDefault,
   }) async {
     final ref = _db.collection('users').doc(user.uid);
     final snap = await ref.get();
 
-    final tipoPadrao = tipoDefault.toLowerCase().trim();
+    final tipo = tipoDefault.toLowerCase().trim();
 
+    // Criar do zero
     if (!snap.exists) {
       await ref.set({
         'uid': user.uid,
         'email': user.email ?? '',
-        'nome': user.displayName ?? '',
-        'tipo': tipoPadrao,
-        'ra': '',
-        'turmas': <String>[],
+        'nome': nome ?? user.displayName ?? '',
+        'tipo': tipo,
+        'role': tipo,
+        'perfil': tipo,
+        'ra': ra ?? '',
+        'turmas': turmasDefault ?? [],
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
-    } else {
-      final data = snap.data() ?? {};
-      final tipoAtual = (data['tipo'] ?? data['role'] ?? '').toString().toLowerCase();
-
-      // 🔁 Se não tiver tipo salvo, define o padrão
-      await ref.set({
-        if ((user.email ?? '').isNotEmpty) 'email': user.email,
-        if ((user.displayName ?? '').isNotEmpty) 'nome': user.displayName,
-        if (tipoAtual.isEmpty) 'tipo': tipoPadrao,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      return;
     }
+
+    // Atualizar doc existente
+    final data = snap.data() ?? {};
+    final tipoAtual =
+        (data['tipo'] ?? data['role'] ?? data['perfil'] ?? "").toString();
+
+    await ref.set({
+      if ((user.email ?? '').isNotEmpty) 'email': user.email,
+      if ((nome ?? user.displayName ?? '').isNotEmpty)
+        'nome': nome ?? user.displayName,
+      if (turmasDefault != null && turmasDefault.isNotEmpty)
+        'turmas': turmasDefault,
+      if (tipoAtual.trim().isEmpty) ...{
+        'tipo': tipo,
+        'role': tipo,
+        'perfil': tipo,
+      },
+      if (ra != null && ra.isNotEmpty) 'ra': ra,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
-  /// Carrega o papel do usuário (tipo/role) e armazena no cache
+  /// Carrega e armazena "aluno", "professor" ou "admin"
   Future<String?> _loadAndCacheUserRole(String uid) async {
     try {
       final doc = await _db.collection('users').doc(uid).get();
       final data = doc.data() ?? {};
-      final role = (data['tipo'] ?? data['role'] ?? '').toString().toLowerCase().trim();
-      currentRole.value = role.isEmpty ? null : role;
-      return role;
+
+      final role =
+          (data['tipo'] ?? data['role'] ?? data['perfil'] ?? '').toString();
+
+      final trimmed = role.toLowerCase().trim();
+      currentRole.value = trimmed.isEmpty ? null : trimmed;
+
+      return currentRole.value;
     } catch (_) {
       currentRole.value = null;
       return null;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // PERFIL / USUÁRIO
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // PERFIL / CONSULTAS
+  // =============================================================================
 
   Future<Map<String, dynamic>?> getUserDoc([String? uid]) async {
-    final theUid = uid ?? _auth.currentUser?.uid;
-    if (theUid == null) return null;
-    final doc = await _db.collection('users').doc(theUid).get();
+    final id = uid ?? currentUser?.uid;
+    if (id == null) return null;
+
+    final doc = await _db.collection('users').doc(id).get();
     return doc.data();
   }
 
-  /// Atualiza campos seguros do perfil do usuário
   Future<void> updateUserProfile(Map<String, dynamic> data, {String? uid}) async {
-    final theUid = uid ?? _auth.currentUser?.uid;
-    if (theUid == null) throw Exception('Usuário não autenticado');
+    final id = uid ?? currentUser?.uid;
+    if (id == null) throw Exception('Usuário não autenticado.');
 
-    final safe = <String, dynamic>{};
-    if (data.containsKey('telefone')) safe['telefone'] = data['telefone'];
-    if (data.containsKey('theme')) safe['theme'] = data['theme'];
-    if (data.containsKey('dateFormat')) safe['dateFormat'] = data['dateFormat'];
-    if (data.containsKey('prefs')) safe['prefs'] = data['prefs'];
-    if (data.containsKey('nome')) safe['nome'] = data['nome'];
-
-    safe['updatedAt'] = FieldValue.serverTimestamp();
-
-    await _db.collection('users').doc(theUid).set(safe, SetOptions(merge: true));
+    await _db.collection('users').doc(id).set({
+      ...data,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
-  /// Retorna o perfil do usuário (tipo/role)
   Future<String?> buscarPerfil([String? uid]) async {
-    final theUid = uid ?? _auth.currentUser?.uid;
-    if (theUid == null) return null;
-    if (currentRole.value != null) return currentRole.value;
-    return await _loadAndCacheUserRole(theUid);
+    final id = uid ?? currentUser?.uid;
+    if (id == null) return null;
+
+    if (currentRole.value != null) return currentRole.value!;
+    return await _loadAndCacheUserRole(id);
   }
 
   Future<bool> isProfessor([String? uid]) async =>
@@ -168,18 +233,21 @@ class AuthService {
   Future<bool> isAluno([String? uid]) async =>
       (await buscarPerfil(uid)) == 'aluno';
 
-  /// Retorna lista de IDs das turmas associadas ao usuário
   Future<List<String>> getTurmas([String? uid]) async {
     final data = await getUserDoc(uid);
-    final list = (data?['turmas'] as List?) ?? const [];
-    return list.map((e) => e.toString()).toList();
+    if (data == null) return [];
+
+    final raw = data['turmas'];
+    if (raw is List) return raw.map((e) => e.toString()).toList();
+    if (raw is String && raw.trim().isNotEmpty) return [raw];
+
+    return [];
   }
 
-  // ---------------------------------------------------------------------------
-  // BUSCAS para o professor
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // BUSCAS
+  // =============================================================================
 
-  /// Buscar e-mail pelo RA
   Future<String?> buscarEmailPorRA(String ra) async {
     try {
       final q = await _db
@@ -187,40 +255,37 @@ class AuthService {
           .where('ra', isEqualTo: ra)
           .limit(1)
           .get();
-      if (q.docs.isNotEmpty) return q.docs.first.data()['email'] as String?;
+
+      if (q.docs.isNotEmpty) return q.docs.first.data()['email'];
       return null;
     } catch (e) {
       throw Exception('Erro ao buscar RA: $e');
     }
   }
 
-  /// Buscar um aluno pelo e-mail
   Future<Map<String, dynamic>?> buscarAlunoPorEmail(String email) async {
     final q = await _db
         .collection('users')
-        .where('email', isEqualTo: email)
-        .where(Filter.or(
-          Filter('tipo', isEqualTo: 'aluno'),
-          Filter('role', isEqualTo: 'aluno'),
-        ))
+        .where('email', isEqualTo: email.trim())
+        .where('tipo', isEqualTo: 'aluno')
         .limit(1)
         .get();
+
     if (q.docs.isEmpty) return null;
     return {'id': q.docs.first.id, ...q.docs.first.data()};
   }
 
-  /// Busca flexível de alunos (por nome, RA ou e-mail)
   Future<List<Map<String, dynamic>>> buscarAlunosPorTermo(
     String termo, {
-    int limit = 15,
+    int limit = 20,
   }) async {
     final t = termo.trim();
     if (t.isEmpty) return [];
 
+    final results = <Map<String, dynamic>>[];
     final seen = <String>{};
-    final out = <Map<String, dynamic>>[];
 
-    // Busca por RA
+    // RA
     final byRa = await _db
         .collection('users')
         .where('ra', isEqualTo: t)
@@ -228,7 +293,7 @@ class AuthService {
         .limit(limit)
         .get();
 
-    // Busca por e-mail
+    // Email
     final byEmail = await _db
         .collection('users')
         .where('email', isEqualTo: t)
@@ -236,33 +301,37 @@ class AuthService {
         .limit(limit)
         .get();
 
-    // Busca por nome (prefixo)
-    final end = t.substring(0, t.length - 1) +
+    // Busca por nome — prefix search
+    final upper = t.substring(0, t.length - 1) +
         String.fromCharCode(t.codeUnitAt(t.length - 1) + 1);
+
     final byName = await _db
         .collection('users')
         .where('tipo', isEqualTo: 'aluno')
         .orderBy('nome')
         .startAt([t])
-        .endBefore([end])
+        .endBefore([upper])
         .limit(limit)
         .get();
 
-    void addAll(QuerySnapshot<Map<String, dynamic>> qs) {
-      for (final d in qs.docs) {
-        if (seen.add(d.id)) out.add({'id': d.id, ...d.data()});
+    void add(QuerySnapshot<Map<String, dynamic>> qs) {
+      for (var d in qs.docs) {
+        if (seen.add(d.id)) {
+          results.add({'id': d.id, ...d.data()});
+        }
       }
     }
 
-    addAll(byRa);
-    addAll(byEmail);
-    addAll(byName);
-    return out.take(limit).toList();
+    add(byRa);
+    add(byEmail);
+    add(byName);
+
+    return results.take(limit).toList();
   }
 
-  // ---------------------------------------------------------------------------
-  // SENHA / SESSÃO
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // SESSÃO / SENHA
+  // =============================================================================
 
   Future<void> signOut() async {
     await _auth.signOut();
@@ -271,7 +340,7 @@ class AuthService {
 
   Future<void> resetPassword(String email) async {
     try {
-      await _auth.sendPasswordResetEmail(email: email);
+      await _auth.sendPasswordResetEmail(email: email.trim());
     } on FirebaseAuthException catch (e) {
       throw Exception(_mapFirebaseError(e));
     }
@@ -280,10 +349,12 @@ class AuthService {
   Future<void> reauthenticate(String password) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception('Usuário não autenticado.');
+
     final cred = EmailAuthProvider.credential(
-      email: user.email ?? '',
+      email: user.email ?? "",
       password: password,
     );
+
     await user.reauthenticateWithCredential(cred);
   }
 
@@ -294,30 +365,28 @@ class AuthService {
     currentRole.value = null;
   }
 
-  // ---------------------------------------------------------------------------
+  // =============================================================================
   // ERROS
-  // ---------------------------------------------------------------------------
+  // =============================================================================
 
   String _mapFirebaseError(FirebaseAuthException e) {
     switch (e.code) {
       case 'invalid-email':
-        return 'E-mail inválido.';
+        return 'E-mail inválido';
       case 'user-not-found':
-        return 'Usuário não encontrado.';
+        return 'Usuário não encontrado';
       case 'wrong-password':
-        return 'Senha incorreta.';
+        return 'Senha incorreta';
       case 'email-already-in-use':
-        return 'E-mail já está em uso.';
+        return 'E-mail já está em uso';
       case 'weak-password':
-        return 'A senha é muito fraca.';
+        return 'Senha muito fraca';
       case 'user-disabled':
-        return 'Usuário desativado.';
+        return 'Usuário desativado';
       case 'too-many-requests':
-        return 'Muitas tentativas. Tente novamente em instantes.';
+        return 'Muitas tentativas. Aguarde um pouco.';
       case 'network-request-failed':
         return 'Falha de rede. Verifique sua conexão.';
-      case 'operation-not-allowed':
-        return 'Operação não permitida neste projeto.';
       default:
         return 'Erro: ${e.message ?? e.code}';
     }

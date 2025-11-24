@@ -3,20 +3,42 @@ import 'package:go_router/go_router.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../components/cards/index.dart';
 
-/// Tela de Login:
-/// - Exibe o [LoginCard] com campos de email e senha.
-/// - Se já estiver logado, redireciona automaticamente para `/landing`
-///   (que decide se vai para o dashboard de aluno ou professor).
-class LoginPage extends StatelessWidget {
+/// =================================================================
+/// LOGIN PAGE — Sistema Poliedro
+/// =================================================================
+/// Regras de acesso:
+///  • Professores → email @sistemapoliedro.com.br
+///  • Alunos      → email @alunosistemapoliedro.com.br
+///
+/// A página redireciona automaticamente se o usuário já estiver logado.
+///
+/// A validação do domínio é feita no LoginCard.
+/// =================================================================
+class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
 
-  void _goToLanding(BuildContext context) {
-    // Usa microtask para evitar conflito de build
-    Future.microtask(() {
-      if (context.mounted) context.go('/landing');
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  bool _redirected = false;
+
+  /// ================================================================
+  /// 🔹 Redirecionamento seguro (evita loops do StreamBuilder)
+  /// ================================================================
+  void _redirectToLanding() {
+    if (_redirected || !mounted) return;
+    _redirected = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.go('/landing');
     });
   }
 
+  /// ================================================================
+  /// 🔹 UI
+  /// ================================================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -24,9 +46,11 @@ class LoginPage extends StatelessWidget {
       body: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snap) {
-          // ✅ Redireciona automaticamente se já estiver logado
-          if (snap.connectionState == ConnectionState.active && snap.data != null) {
-            _goToLanding(context);
+          final user = snap.data;
+
+          // Usuário já possui sessão → envia para rota de decisão (Index/Landing)
+          if (snap.connectionState == ConnectionState.active && user != null) {
+            _redirectToLanding();
           }
 
           return Container(
@@ -35,9 +59,9 @@ class LoginPage extends StatelessWidget {
             decoration: const BoxDecoration(
               gradient: LinearGradient(
                 colors: [
-                  Color(0xFFFF6A6A), // rosa/laranja
-                  Color(0xFF6A11CB), // roxo
-                  Color(0xFF2575FC), // azul
+                  Color(0xFFFF6A6A),
+                  Color(0xFF6A11CB),
+                  Color(0xFF2575FC),
                 ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
@@ -47,61 +71,76 @@ class LoginPage extends StatelessWidget {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 520),
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(24.0),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 24, vertical: 40),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // Logo
-                      Image.asset(
-                        'assets/poliedro-logo.png',
-                        height: 80,
-                        errorBuilder: (_, __, ___) => const Icon(
-                          Icons.school_rounded,
-                          size: 80,
-                          color: Colors.white,
+                      // ====================================================
+                      // LOGO
+                      // ====================================================
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 600),
+                        curve: Curves.easeOutBack,
+                        child: Image.asset(
+                          'assets/poliedro-logo.png',
+                          height: 110,
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, __, ___) => const Icon(
+                            Icons.school_rounded,
+                            size: 90,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 16),
 
-                      // Título
+                      const SizedBox(height: 35),
+
+                      // ====================================================
+                      // TÍTULO
+                      // ====================================================
                       const Text(
-                        'Sistema Educacional',
+                        'Sistema Educacional Poliedro',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.bold,
                           color: Colors.white,
-                          letterSpacing: .2,
+                          letterSpacing: .3,
                         ),
-                        textAlign: TextAlign.center,
                       ),
-                      const SizedBox(height: 8),
 
-                      // Subtítulo
+                      const SizedBox(height: 12),
+
+                      // ====================================================
+                      // SUBTÍTULO
+                      // ====================================================
                       const Text(
                         'Acesse sua conta para continuar',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
-                          fontSize: 14,
+                          fontSize: 15,
                           color: Colors.white70,
                         ),
-                        textAlign: TextAlign.center,
                       ),
-                      const SizedBox(height: 28),
 
-                      // Card de login
-                      LoginCard(),
+                      const SizedBox(height: 35),
 
-                      const SizedBox(height: 16),
+                      // ====================================================
+                      // CARTÃO DE LOGIN
+                      // ====================================================
+                      const LoginCard(),
 
-                      // Loader sutil durante verificação de sessão
+                      const SizedBox(height: 20),
+
+                      // Loader enquanto o Firebase sincroniza sessão
                       if (snap.connectionState == ConnectionState.waiting)
                         const Padding(
-                          padding: EdgeInsets.only(top: 8.0),
-                          child: Opacity(
-                            opacity: 0.8,
-                            child: LinearProgressIndicator(
-                              minHeight: 3,
-                              backgroundColor: Colors.white24,
-                            ),
+                          padding: EdgeInsets.only(top: 10.0),
+                          child: LinearProgressIndicator(
+                            minHeight: 3,
+                            backgroundColor: Colors.white30,
+                            color: Colors.white,
                           ),
                         ),
                     ],

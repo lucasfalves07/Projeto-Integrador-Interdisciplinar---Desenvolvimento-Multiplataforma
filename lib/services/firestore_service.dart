@@ -1,13 +1,22 @@
-// lib/services/firestore_service.dart
+// 🔥 FirestoreService — COMPLETO, OTIMIZADO E ALINHADO AO FIRESTORE
+// Projeto Poliedro
+
 import 'dart:async';
+import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseStorage _storage = FirebaseStorage.instance;
 
-  // =======================================================================
+  // ============================================================================
   // 🔹 USUÁRIOS
-  // =======================================================================
+  // ============================================================================
+
   Future<Map<String, dynamic>?> getUserByUid(String uid) async {
     try {
       final doc = await _db.collection("users").doc(uid).get();
@@ -17,423 +26,639 @@ class FirestoreService {
     }
   }
 
-  Future<void> updateUserField(String uid, Map<String, dynamic> data) async {
+  Future<void> updateUserProfile(String uid, Map<String, dynamic> dados) async {
     try {
-      await _db.collection("users").doc(uid).update(data);
-    } catch (e) {
-      throw Exception("Erro ao atualizar usuário: $e");
-    }
-  }
-
-  Future<void> updateUserProfile(String uid, Map<String, dynamic> data) async {
-    try {
-      await _db.collection("users").doc(uid).set(
-        {
-          ...data,
-          "updatedAt": FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await _db.collection('users').doc(uid).set({
+        ...dados,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (e) {
       throw Exception("Erro ao atualizar perfil: $e");
     }
   }
 
-  /// 🔔 Salva ou atualiza o token FCM do usuário logado
-  Future<void> salvarTokenFcm(String uid, String token) async {
+  Future<void> setUserRole(String uid, String role) async {
     try {
-      await _db.collection("users").doc(uid).set({
-        "fcmToken": token,
-        "tokenUpdatedAt": FieldValue.serverTimestamp(),
+      final normalized = role.trim().toLowerCase();
+      await _db.collection('users').doc(uid).set({
+        'tipo': normalized,
+        'role': normalized,
+        'perfil': normalized,
+        'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
     } catch (e) {
-      throw Exception("Erro ao salvar token FCM: $e");
+      throw Exception('Erro ao definir função: $e');
     }
   }
 
-  // =======================================================================
-  // ⚙️ CONFIGURAÇÕES / PREFS / META
-  // =======================================================================
-  Future<Map<String, dynamic>?> getNotificationPrefs(String uid) async {
+  /// Pesquisa usuários por nome/email/RA
+  Future<List<Map<String, dynamic>>> buscarUsuariosPorTermo(
+    String termo, {
+    String? tipo,
+    int limit = 30,
+  }) async {
     try {
-      final doc = await _db
-          .collection("users")
-          .doc(uid)
-          .collection("prefs")
-          .doc("notifications")
+      final t = termo.trim();
+      if (t.isEmpty) return [];
+
+      final results = <String, Map<String, dynamic>>{};
+
+      // Email exato
+      final byEmail = await _db
+          .collection('users')
+          .where('email', isEqualTo: t)
+          .limit(limit)
           .get();
-      return doc.data() ?? {};
+
+      for (final d in byEmail.docs) {
+        results[d.id] = {'id': d.id, ...d.data()};
+      }
+
+      // RA exato
+      final byRa = await _db
+          .collection('users')
+          .where('ra', isEqualTo: t)
+          .limit(limit)
+          .get();
+
+      for (final d in byRa.docs) {
+        results[d.id] = {'id': d.id, ...d.data()};
+      }
+
+      // Prefixo de nome
+      Future<void> prefixSearch(String campo) async {
+        final q = await _db
+            .collection('users')
+            .orderBy(campo)
+            .startAt([t])
+            .endAt(["$t\uf8ff"])
+            .limit(limit)
+            .get();
+
+        for (final d in q.docs) {
+          results[d.id] = {'id': d.id, ...d.data()};
+        }
+      }
+
+      try {
+        await prefixSearch('nomeLower');
+      } catch (_) {
+        try {
+          await prefixSearch('nome');
+        } catch (_) {}
+      }
+
+      final list = results.values.where((u) {
+        if (tipo == null) return true;
+        final v = (u['tipo'] ?? u['role'] ?? '').toString();
+        return v == tipo;
+      }).toList();
+
+      list.sort((a, b) => (a['nome'] ?? '').toString().compareTo((b['nome'] ?? '')));
+
+      return list.take(limit).toList();
     } catch (e) {
-      print("Erro getNotificationPrefs: $e");
-      return {};
+      throw Exception('Erro ao buscar usuários: $e');
     }
   }
 
-  Future<void> updateNotificationPrefs(
-      String uid, Map<String, dynamic> prefs) async {
+  /// Define RA e sincroniza users ↔ alunos
+  Future<void> setUserRA(String uid, String ra) async {
     try {
-      await _db
-          .collection("users")
-          .doc(uid)
-          .collection("prefs")
-          .doc("notifications")
-          .set(
-        {
-          ...prefs,
-          "updatedAt": FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      final raTrim = ra.trim();
+
+      // Atualiza users
+      await _db.collection('users').doc(uid).set({
+        'ra': raTrim,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      final userData = (await _db.collection('users').doc(uid).get()).data() ?? {};
+      final turmas = (userData['turmas'] as List?)?.map((e) => e.toString()).toList() ?? [];
+
+      // Atualiza alunos
+      await _db.collection('alunos').doc(uid).set({
+        'uid': uid,
+        'nome': userData['nome'] ?? '',
+        'ra': raTrim,
+        'turmas': turmas,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (e) {
-      throw Exception("Erro ao atualizar notificações: $e");
+      throw Exception("Erro ao definir RA: $e");
     }
   }
 
-  Future<Map<String, dynamic>> getAppMeta() async {
+  /// Adiciona usuário em turmas
+  Future<void> addUserToTurmas(String uid, List<String> turmaIds) async {
+    if (turmaIds.isEmpty) return;
+
     try {
-      final doc = await _db.collection("app_meta").doc("global").get();
-      return doc.data() ?? {};
+      final u = await _db.collection('users').doc(uid).get();
+      final ra = (u.data()?['ra'] ?? '').toString();
+      final marker = ra.isNotEmpty ? ra : uid;
+
+      // Users
+      await _db.collection('users').doc(uid).set({
+        'turmas': FieldValue.arrayUnion(turmaIds),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // Alunos
+      await _db.collection('alunos').doc(uid).set({
+        'turmas': FieldValue.arrayUnion(turmaIds),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // Turmas
+      for (final t in turmaIds) {
+        await _db.collection('turmas').doc(t).set({
+          'alunosIds': FieldValue.arrayUnion([marker]),
+        }, SetOptions(merge: true));
+      }
     } catch (e) {
-      print("Erro getAppMeta: $e");
-      return {};
+      throw Exception("Erro ao adicionar às turmas: $e");
     }
   }
 
-  // =======================================================================
-  // 🧑‍🏫 TURMAS
-  // =======================================================================
+  Future<void> removeUserFromTurmas(String uid, List<String> turmaIds) async {
+    if (turmaIds.isEmpty) return;
+
+    try {
+      final u = await _db.collection('users').doc(uid).get();
+      final ra = (u.data()?['ra'] ?? '').toString();
+      final marker = ra.isNotEmpty ? ra : uid;
+
+      // users
+      await _db.collection('users').doc(uid).set({
+        'turmas': FieldValue.arrayRemove(turmaIds),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // alunos
+      await _db.collection('alunos').doc(uid).set({
+        'turmas': FieldValue.arrayRemove(turmaIds),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // turmas
+      for (final t in turmaIds) {
+        await _db.collection('turmas').doc(t).set({
+          'alunosIds': FieldValue.arrayRemove([marker]),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      throw Exception("Erro ao remover das turmas: $e");
+    }
+  }
+
+  // ============================================================================
+  // 🔹 TURMAS
+  // ============================================================================
+
   Future<void> criarTurma({
     required String nome,
     required String disciplina,
     required String professorId,
+    String? anoSerie,
+    String? turno,
+    int? periodoLetivo,
+    int capacidade = 30,
   }) async {
     try {
-      await _db.collection("turmas").add({
-        "nome": nome,
-        "disciplina": disciplina,
+      final disciplinaRef = _db.collection("disciplinas").doc();
+      final disciplinaId = disciplinaRef.id;
+
+      // Cria disciplina
+      await disciplinaRef.set({
+        "id": disciplinaId,
+        "nome": disciplina,
         "professorId": professorId,
-        "alunos": [],
+        "turmaId": "",
         "criadoEm": FieldValue.serverTimestamp(),
       });
+
+      // Cria turma
+      final turmaRef = await _db.collection("turmas").add({
+        "nome": nome,
+        "anoSerie": anoSerie ?? "",
+        "turno": turno ?? "",
+        "periodoLetivo": periodoLetivo ?? DateTime.now().year,
+        "capacidade": capacidade,
+        "professorId": professorId,
+        "disciplinas": [
+          {"id": disciplinaId, "nome": disciplina}
+        ],
+        "alunos": [],
+        "alunosIds": [],
+        "criadoEm": FieldValue.serverTimestamp(),
+      });
+
+      // Vincula disciplina à turma
+      await disciplinaRef.update({"turmaId": turmaRef.id});
+
+      // Atualiza user
+      await _db.collection("users").doc(professorId).set({
+        "turmas": FieldValue.arrayUnion([turmaRef.id]),
+      }, SetOptions(merge: true));
     } catch (e) {
       throw Exception("Erro ao criar turma: $e");
     }
   }
 
-  Future<void> adicionarAlunoNaTurma(
-      String turmaId, String nomeAluno, String ra) async {
+  Future<List<Map<String, dynamic>>> listarTurmasDoProfessor(String professorId) async {
     try {
-      final turmaRef = _db.collection("turmas").doc(turmaId);
-      await turmaRef.update({
-        "alunos": FieldValue.arrayUnion([
-          {"nome": nomeAluno, "ra": ra}
-        ]),
-      });
-    } catch (e) {
-      throw Exception("Erro ao adicionar aluno: $e");
-    }
-  }
-
-  Future<List<Map<String, dynamic>>> listarTurmasDoProfessor(
-      String professorId) async {
-    try {
-      final snapshot = await _db
-          .collection("turmas")
-          .where("professorId", isEqualTo: professorId)
+      final snap = await _db
+          .collection('turmas')
+          .where('professorId', isEqualTo: professorId)
           .get();
-      return snapshot.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+
+      final turmas = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+
+      if (turmas.isNotEmpty) return turmas;
+
+      final viaPerfil = await _listarTurmasViaPerfil(professorId);
+      if (viaPerfil.isNotEmpty) return viaPerfil;
+
+      return await _listarTurmasViaDisciplinas(professorId);
     } catch (e) {
       throw Exception("Erro ao listar turmas: $e");
     }
   }
 
-  Future<List<Map<String, dynamic>>> listarTurmasDoAluno(String alunoUid) async {
+  Future<List<Map<String, dynamic>>> _listarTurmasViaPerfil(String professorId) async {
+    final doc = await _db.collection('users').doc(professorId).get();
+    final data = doc.data() ?? {};
+    final ids = _extractTurmaIds(data['turmas']);
+
+    if (ids.isEmpty) return [];
+
+    final futures = ids.map((t) => _db.collection('turmas').doc(t).get());
+    final snaps = await Future.wait(futures);
+
+    return snaps
+        .where((snap) => snap.exists)
+        .map((snap) => {'id': snap.id, ...snap.data()!})
+        .toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _listarTurmasViaDisciplinas(String professorId) async {
+    final disciplinas =
+        await _db.collection('disciplinas').where('professorId', isEqualTo: professorId).get();
+
+    final ids = disciplinas.docs
+        .map((d) => (d['turmaId'] ?? '').toString())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+
+    final list = <Map<String, dynamic>>[];
+
+    for (final t in ids) {
+      final snap = await _db.collection('turmas').doc(t).get();
+      if (snap.exists) list.add({'id': snap.id, ...snap.data()!});
+    }
+
+    return list;
+  }
+
+  Set<String> _extractTurmaIds(dynamic raw) {
+    final ids = <String>{};
+
+    if (raw is String && raw.trim().isNotEmpty) {
+      ids.add(raw.trim());
+    } else if (raw is List) {
+      for (final item in raw) {
+        if (item is String && item.trim().isNotEmpty) {
+          ids.add(item.trim());
+        } else if (item is Map) {
+          final value = item['id'] ?? item['turmaId'];
+          if (value != null && value.toString().trim().isNotEmpty) {
+            ids.add(value.toString().trim());
+          }
+        }
+      }
+    }
+
+    return ids;
+  }
+
+  // ============================================================================
+  // 🔹 ALUNOS
+  // ============================================================================
+
+  Future<void> addAlunoNaTurma({
+    required String turmaId,
+    required String nome,
+    required String ra,
+  }) async {
     try {
-      final snapshot = await _db
-          .collection("turmas")
-          .where("alunos", arrayContains: alunoUid)
-          .get();
-      return snapshot.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+      // Turma
+      await _db.collection("turmas").doc(turmaId).update({
+        "alunos": FieldValue.arrayUnion([
+          {"nome": nome, "ra": ra}
+        ]),
+        "alunosIds": FieldValue.arrayUnion([ra]),
+      });
+
+      // Coleção alunos
+      await _db.collection("alunos").doc(ra).set({
+        "nome": nome,
+        "ra": ra,
+        "status": "Ativo",
+        "turmaId": turmaId,
+        "criadoEm": FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (e) {
-      throw Exception("Erro ao listar turmas do aluno: $e");
+      throw Exception("Erro ao adicionar aluno: $e");
     }
   }
 
-  // =======================================================================
-  // 📝 ATIVIDADES
-  // =======================================================================
+  Future<void> removerAlunoDaTurma(String turmaId, String ra) async {
+    try {
+      final ref = _db.collection("turmas").doc(turmaId);
+      final doc = await ref.get();
+
+      final alunos = (doc['alunos'] as List?) ?? [];
+      alunos.removeWhere((a) => a['ra'] == ra);
+
+      await ref.update({
+        "alunos": alunos,
+        "alunosIds": FieldValue.arrayRemove([ra]),
+      });
+    } catch (e) {
+      throw Exception("Erro ao remover aluno: $e");
+    }
+  }
+
+  // ============================================================================
+  // 🔹 MATERIAIS / ARQUIVOS
+  // ============================================================================
+
+  Future<Map<String, dynamic>?> uploadArquivoAtividade(String uid) async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        allowMultiple: false,
+        type: FileType.custom,
+        allowedExtensions: [
+          'jpg',
+          'jpeg',
+          'png',
+          'pdf',
+          'mp4',
+          'mov',
+          'doc',
+          'docx',
+          'ppt',
+          'pptx'
+        ],
+      );
+
+      if (picked == null) return null;
+
+      final file = picked.files.single;
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${file.name}';
+      final ref = _storage.ref().child('materiais/$uid/$fileName');
+
+      final metadata = SettableMetadata(
+        contentType: _definirContentType(file.extension),
+        customMetadata: {
+          'fileName': file.name,
+          'size': file.size.toString(),
+          'user': uid,
+        },
+      );
+
+      UploadTask uploadTask;
+
+      if (kIsWeb && file.bytes != null) {
+        uploadTask = ref.putData(file.bytes!, metadata);
+      } else if (file.path != null) {
+        uploadTask = ref.putFile(File(file.path!), metadata);
+      } else {
+        throw Exception("Arquivo inválido.");
+      }
+
+      final snap = await uploadTask.whenComplete(() {});
+      final url = await snap.ref.getDownloadURL();
+
+      return {
+        'url': url,
+        'nome': file.name,
+        'ext': file.extension ?? "",
+        'size': file.size,
+        'path': snap.ref.fullPath,
+      };
+    } catch (e) {
+      throw Exception("Erro ao enviar arquivo: $e");
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> listarMateriaisPorTurma(
+    String turmaId, {
+    int limit = 30,
+  }) async {
+    try {
+      if (turmaId.isEmpty) return [];
+      final snap =
+          await _db.collection("materiais").where("turmaId", isEqualTo: turmaId).get();
+      final materiais = snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+      materiais.sort(
+        (a, b) => _asDate(b["criadoEm"]).compareTo(_asDate(a["criadoEm"])),
+      );
+      if (limit > 0 && materiais.length > limit) {
+        return materiais.take(limit).toList();
+      }
+      return materiais;
+    } catch (e) {
+      throw Exception("Erro ao listar materiais da turma: $e");
+    }
+  }
+
+  String _definirContentType(String? ext) {
+    switch (ext?.toLowerCase()) {
+      case 'pdf':
+        return 'application/pdf';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'doc':
+        return 'application/msword';
+      case 'docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      case 'ppt':
+        return 'application/vnd.ms-powerpoint';
+      case 'pptx':
+        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  // ============================================================================
+  // 🔹 ATIVIDADES
+  // ============================================================================
+
   Future<void> criarAtividade(Map<String, dynamic> atividade) async {
     try {
-      await _db.collection("atividades").add({
-        "titulo": atividade["titulo"],
-        "disciplinaId": atividade["disciplinaId"],
-        "turmaId": atividade["turmaId"],
-        "professorId": atividade["professorId"],
-        "max": atividade["max"],
-        "peso": atividade["peso"],
-        "dataCriacao": FieldValue.serverTimestamp(),
-        "draft": atividade["draft"] ?? false,
+      final id = 'A${DateTime.now().millisecondsSinceEpoch}';
+
+      await _db.collection("atividades").doc(id).set({
+        "id": id,
+        "professorId": atividade['professorId'],
+        "turmaId": atividade['turmaId'],
+        "disciplinaId": atividade['disciplinaId'],
+        "titulo": atividade['titulo'],
+        "descricao": atividade['descricao'] ?? "",
+        "max": atividade["max"] ?? 10,
+        "peso": atividade["peso"] ?? 1,
+        "criadoEm": FieldValue.serverTimestamp(),
       });
     } catch (e) {
       throw Exception("Erro ao criar atividade: $e");
     }
   }
 
-  Future<List<Map<String, dynamic>>> buscarAtividadesPorTurma(
-      String turmaId) async {
+  Future<List<Map<String, dynamic>>> listarAtividades(String turmaId) async {
     try {
-      final snapshot = await _db
-          .collection("atividades")
-          .where("turmaId", isEqualTo: turmaId)
-          .orderBy("dataCriacao", descending: true)
-          .get();
-      return snapshot.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+      final snap =
+          await _db.collection("atividades").where("turmaId", isEqualTo: turmaId).get();
+      return snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
     } catch (e) {
-      throw Exception("Erro ao buscar atividades: $e");
+      throw Exception("Erro ao listar atividades: $e");
     }
   }
 
-  Stream<List<Map<String, dynamic>>> streamAtividadesPorTurmas(
-      List<String> turmaIds) {
-    return _streamWhereInChunked(
-      collection: 'atividades',
-      field: 'turmaId',
-      values: turmaIds,
-      orderBy: 'dataCriacao',
-      descending: true,
-    );
-  }
-
-  // =======================================================================
-  // 🎯 NOTAS E DESEMPENHO
-  // =======================================================================
-  Future<void> lancarNota({
-    required String atividadeId,
-    required String alunoUid,
-    required double nota,
-    required String professorId,
+  Future<List<Map<String, dynamic>>> buscarAtividadesPorTurma(
+    String turmaId, {
+    int limit = 25,
   }) async {
     try {
-      await _db.collection("notas").doc("${atividadeId}_$alunoUid").set({
-        "atividadeId": atividadeId,
-        "alunoUid": alunoUid,
-        "professorId": professorId,
-        "nota": nota,
-        "dataLancamento": FieldValue.serverTimestamp(),
-      });
+      if (turmaId.isEmpty) return [];
+      final atividades = await listarAtividades(turmaId);
+      atividades.sort(
+        (a, b) => _asDate(b["criadoEm"]).compareTo(_asDate(a["criadoEm"])),
+      );
+      if (limit > 0 && atividades.length > limit) {
+        return atividades.take(limit).toList();
+      }
+      return atividades;
+    } catch (e) {
+      throw Exception("Erro ao buscar atividades da turma: $e");
+    }
+  }
+
+  // ============================================================================
+  // 🔹 NOTAS
+  // ============================================================================
+
+  Future<void> lancarNota(Map<String, dynamic> data) async {
+    try {
+      final id = "${data["atividadeId"]}_${data["alunoRa"]}";
+
+      await _db.collection("notas").doc(id).set({
+        "atividadeId": data["atividadeId"],
+        "atividadeTitulo": data["atividadeTitulo"],
+        "alunoRa": data["alunoRa"],
+        "alunoNome": data["alunoNome"],
+        "professorId": data["professorId"],
+        "turmaId": data["turmaId"],
+        "disciplinaId": data["disciplinaId"],
+        "nota": data["nota"],
+        "data": FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (e) {
       throw Exception("Erro ao lançar nota: $e");
     }
   }
 
-  Future<List<Map<String, dynamic>>> buscarNotasAluno(String alunoUid) async {
+  Future<List<Map<String, dynamic>>> getNotasPorTurma(String turmaId) async {
     try {
-      final snapshot =
-          await _db.collection("notas").where("alunoUid", isEqualTo: alunoUid).get();
-      return snapshot.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+      final snap =
+          await _db.collection("notas").where('turmaId', isEqualTo: turmaId).get();
+      return snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
     } catch (e) {
       throw Exception("Erro ao buscar notas: $e");
     }
   }
 
-  Future<double> calcularMediaTurma(String turmaId) async {
-    try {
-      final atividadesSnap =
-          await _db.collection("atividades").where("turmaId", isEqualTo: turmaId).get();
-      if (atividadesSnap.docs.isEmpty) return 0;
-
-      double somaNotas = 0;
-      int totalNotas = 0;
-
-      for (final atividade in atividadesSnap.docs) {
-        final notasSnap = await _db
-            .collection("notas")
-            .where("atividadeId", isEqualTo: atividade.id)
-            .get();
-        for (final n in notasSnap.docs) {
-          somaNotas += (n.data()["nota"] ?? 0).toDouble();
-          totalNotas++;
-        }
-      }
-      return totalNotas == 0 ? 0 : somaNotas / totalNotas;
-    } catch (e) {
-      print("Erro calcularMediaTurma: $e");
-      return 0;
-    }
-  }
-
-  Stream<List<Map<String, dynamic>>> streamNotasAluno(String alunoUid) {
+  Stream<List<Map<String, dynamic>>> streamNotasAluno(String alunoRa) {
     return _db
-        .collection('notas')
-        .where('alunoUid', isEqualTo: alunoUid)
-        .orderBy('dataLancamento', descending: true)
+        .collection("notas")
+        .where("alunoRa", isEqualTo: alunoRa)
         .snapshots()
         .map((s) => s.docs.map((d) => {"id": d.id, ...d.data()}).toList());
   }
 
-  // =======================================================================
-  // 📘 MATERIAIS
-  // =======================================================================
-  Future<void> adicionarMaterial({
-    required String titulo,
-    required String professorId,
-    required List<String> turmasDesignadas,
-    required String url,
-    String? disciplina,
-    String? fileName,
-    num? fileSize,
-    String status = "ready",
-  }) async {
-    try {
-      await _db.collection("materiais").add({
-        "titulo": titulo,
-        "professorId": professorId,
-        "turmasDesignadas": turmasDesignadas,
-        "disciplina": disciplina ?? "",
-        "url": url,
-        "fileName": fileName ?? "",
-        "fileSize": fileSize ?? 0,
-        "status": status,
-        "dataUpload": FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      throw Exception("Erro ao adicionar material: $e");
-    }
+  // ============================================================================
+  // 🔹 CONFIG / PREFS
+  // ============================================================================
+
+  Future<Map<String, dynamic>?> getNotificationPrefs(String uid) async {
+    final doc = await _db.collection('notification_prefs').doc(uid).get();
+    return doc.data();
   }
 
-  Future<List<Map<String, dynamic>>> listarMateriaisPorTurma(
-      String turmaId) async {
-    try {
-      final snapshot = await _db
-          .collection("materiais")
-          .where("turmasDesignadas", arrayContains: turmaId)
-          .orderBy("dataUpload", descending: true)
-          .get();
-      return snapshot.docs.map((d) => {"id": d.id, ...d.data()}).toList();
-    } catch (e) {
-      throw Exception("Erro ao listar materiais: $e");
-    }
+  Future<Map<String, dynamic>?> getAppMeta() async {
+    final doc = await _db.collection('config').doc('app_meta').get();
+    return doc.data();
   }
 
-  Stream<List<Map<String, dynamic>>> streamMateriaisPorTurmas(
-      List<String> turmaIds) {
-    if (turmaIds.isEmpty) return Stream.value([]);
-    return _db
-        .collection("materiais")
-        .where("turmasDesignadas", arrayContainsAny: turmaIds)
-        .orderBy("dataUpload", descending: true)
-        .snapshots()
-        .map((snap) => snap.docs.map((d) => {"id": d.id, ...d.data()}).toList());
+  Future<void> updateNotificationPrefs(String uid, Map<String, dynamic> prefs) async {
+    await _db.collection('notification_prefs').doc(uid).set({
+      ...prefs,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
-  // =======================================================================
-  // 📤 EXPORTAÇÃO / LIMPEZA
-  // =======================================================================
+  // ============================================================================
+  // 🔹 EXPORTAÇÃO
+  // ============================================================================
+
   Future<Map<String, dynamic>> exportarDadosDoUsuario(String uid) async {
-    try {
-      final turmas =
-          await _db.collection("turmas").where("professorId", isEqualTo: uid).get();
-      final atividades =
-          await _db.collection("atividades").where("professorId", isEqualTo: uid).get();
-      final notas =
-          await _db.collection("notas").where("professorId", isEqualTo: uid).get();
+    final turmas =
+        await _db.collection("turmas").where("professorId", isEqualTo: uid).get();
+    final atividades =
+        await _db.collection("atividades").where("professorId", isEqualTo: uid).get();
+    final notas =
+        await _db.collection("notas").where("professorId", isEqualTo: uid).get();
 
-      return {
-        "turmas": turmas.docs.map((d) => d.data()).toList(),
-        "atividades": atividades.docs.map((d) => d.data()).toList(),
-        "notas": notas.docs.map((d) => d.data()).toList(),
-      };
-    } catch (e) {
-      throw Exception("Erro ao exportar dados: $e");
-    }
+    return {
+      "turmas": turmas.docs.map((d) => d.data()).toList(),
+      "atividades": atividades.docs.map((d) => d.data()).toList(),
+      "notas": notas.docs.map((d) => d.data()).toList(),
+    };
   }
 
   Future<int> limparRascunhos(String uid) async {
-    int totalRemovidos = 0;
-    try {
-      final colecoes = ["atividades", "materiais"];
-      for (final col in colecoes) {
-        final query = await _db
-            .collection(col)
-            .where("professorId", isEqualTo: uid)
-            .where("status", isEqualTo: "rascunho")
-            .get();
+    final snap =
+        await _db.collection('rascunhos').where('uid', isEqualTo: uid).get();
 
-        for (final doc in query.docs) {
-          await doc.reference.delete();
-          totalRemovidos++;
-        }
-      }
-    } catch (e) {
-      print("Erro ao limpar rascunhos: $e");
+    for (final doc in snap.docs) {
+      await doc.reference.delete();
     }
-    return totalRemovidos;
+
+    return snap.docs.length;
   }
 
-  // =======================================================================
-  // ⚙️ HELPERS INTERNOS
-  // =======================================================================
-  Stream<List<Map<String, dynamic>>> _streamWhereInChunked({
-    required String collection,
-    required String field,
-    required List<String> values,
-    required String orderBy,
-    bool descending = true,
-  }) {
-    if (values.isEmpty) return Stream.value([]);
-
-    if (values.length <= 10) {
-      return _db
-          .collection(collection)
-          .where(field, whereIn: values)
-          .orderBy(orderBy, descending: descending)
-          .snapshots()
-          .map((s) => s.docs.map((d) => {"id": d.id, ...d.data()}).toList());
+  DateTime _asDate(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is num) {
+      try {
+        return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+      } catch (_) {}
     }
-
-    final controller = StreamController<List<Map<String, dynamic>>>.broadcast();
-    final subs = <StreamSubscription>[];
-    final blocos = <int, List<Map<String, dynamic>>>{};
-
-    List<List<String>> _chunk(List<String> list, int size) {
-      final result = <List<String>>[];
-      for (var i = 0; i < list.length; i += size) {
-        result.add(list.sublist(i, (i + size > list.length) ? list.length : i + size));
-      }
-      return result;
+    if (value is String) {
+      final parsed = DateTime.tryParse(value);
+      if (parsed != null) return parsed;
     }
-
-    void _emit() {
-      final all = blocos.values.expand((e) => e).toList();
-      all.sort((a, b) {
-        final ma = (a[orderBy] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-        final mb = (b[orderBy] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-        return mb.compareTo(ma);
-      });
-      controller.add(all);
-    }
-
-    final chunks = _chunk(values, 10);
-    for (var i = 0; i < chunks.length; i++) {
-      final idx = i;
-      final sub = _db
-          .collection(collection)
-          .where(field, whereIn: chunks[i])
-          .orderBy(orderBy, descending: descending)
-          .snapshots()
-          .listen((snap) {
-        blocos[idx] = snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
-        _emit();
-      });
-      subs.add(sub);
-    }
-
-    controller.onCancel = () async {
-      for (final s in subs) {
-        await s.cancel();
-      }
-    };
-
-    return controller.stream;
+    return DateTime.fromMillisecondsSinceEpoch(0);
   }
 }

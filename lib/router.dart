@@ -1,5 +1,4 @@
-﻿// lib/router.dart
-import 'dart:async';
+﻿import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -26,16 +25,20 @@ import 'pages/turmas_page.dart';
 import 'pages/materiais_page.dart';
 import 'pages/atividades_page.dart';
 import 'pages/mensagens_page.dart';
+import 'pages/admin_tools.dart';
 import 'pages/alunos_page.dart';
-import 'pages/tabela_notas.dart'; // ✅ novo módulo de notas detalhadas
+import 'pages/boletim_page.dart';
+import 'pages/admin_usuarios.dart';
+import 'pages/desempenho_detalhado_page.dart';
+import 'pages/tabela_notas.dart';
 
 // -----------------------------
 // Aluno (visualizações)
 // -----------------------------
 import 'pages/materiais_aluno.dart';
-import 'pages/notas_aluno.dart';
 import 'pages/mensagens_aluno.dart';
 import 'pages/calendario_aluno.dart';
+import 'pages/atividades_aluno.dart';
 
 /// ======================================================================
 /// 🔒 Página de acesso negado
@@ -55,13 +58,14 @@ class ForbiddenPage extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.lock_outline, size: 64),
+              const Icon(Icons.lock_outline, size: 80, color: Colors.redAccent),
               const SizedBox(height: 16),
-              Text(msg, textAlign: TextAlign.center),
+              Text(msg, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
               const SizedBox(height: 24),
-              FilledButton(
+              FilledButton.icon(
                 onPressed: () => context.go('/'),
-                child: const Text('Voltar ao início'),
+                icon: const Icon(Icons.home_outlined),
+                label: const Text('Voltar ao início'),
               ),
             ],
           ),
@@ -72,11 +76,11 @@ class ForbiddenPage extends StatelessWidget {
 }
 
 /// ======================================================================
-/// 🔁 Atualizador de rotas reativo ao estado do Firebase Auth
+/// 🔁 Atualizador reativo (listener de auth)
 /// ======================================================================
 class GoRouterRefreshStream extends ChangeNotifier {
   GoRouterRefreshStream(Stream<dynamic> stream) {
-    _sub = stream.asBroadcastStream().listen((_) => notifyListeners());
+    _sub = stream.listen((_) => notifyListeners());
   }
   late final StreamSubscription<dynamic> _sub;
   @override
@@ -87,7 +91,7 @@ class GoRouterRefreshStream extends ChangeNotifier {
 }
 
 /// ======================================================================
-/// 🧩 RoleGuard — Protege rotas com base no tipo de usuário
+/// 🧩 RoleGuard — Protege rotas por tipo de usuário
 /// ======================================================================
 class RoleGuard extends StatelessWidget {
   const RoleGuard({
@@ -103,98 +107,58 @@ class RoleGuard extends StatelessWidget {
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      return const _GuardScaffold(
-        icon: Icons.lock_person_outlined,
-        title: 'Sessão necessária',
-        subtitle: 'Faça login para acessar esta área.',
-      );
+      return const ForbiddenPage(message: "Faça login para continuar.");
     }
 
-    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      future: FirebaseFirestore.instance.collection('users').doc(user.uid).get(),
+    return StreamBuilder(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .snapshots(),
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const _GuardScaffold(
-            icon: Icons.hourglass_empty_outlined,
-            title: 'Carregando…',
-            subtitle: 'Verificando sua permissão.',
-            progress: true,
-          );
-        }
-        if (snap.hasError || !snap.hasData || !snap.data!.exists) {
-          return const _GuardScaffold(
-            icon: Icons.error_outline,
-            title: 'Não foi possível validar seu perfil',
-            subtitle: 'Tente novamente mais tarde.',
-          );
+        if (!snap.hasData) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
 
-        final data = snap.data!.data() ?? <String, dynamic>{};
-        final role = (data['role'] ?? data['tipo'] ?? '').toString().toLowerCase();
+        final data = snap.data!.data();
+        if (data == null) {
+          return const ForbiddenPage(message: "Perfil não encontrado.");
+        }
 
-        if (allowedRoles.contains(role)) return child;
-        return const ForbiddenPage();
+        final role = (data['role'] ?? data['tipo'] ?? data['perfil'] ?? 'aluno')
+            .toString()
+            .trim()
+            .toLowerCase();
+
+        return allowedRoles.contains(role)
+            ? child
+            : const ForbiddenPage(message: "Acesso restrito a outro perfil.");
       },
     );
   }
 }
 
-class _GuardScaffold extends StatelessWidget {
-  const _GuardScaffold({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.progress = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool progress;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 56, color: Colors.black54),
-              const SizedBox(height: 12),
-              Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 8),
-              Text(subtitle, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
-              if (progress) ...[
-                const SizedBox(height: 16),
-                const CircularProgressIndicator(),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// ======================================================================
-/// 🚀 RoleLandingPage — Decide painel do usuário (aluno/professor)
+/// 🚀 RoleLandingPage — Decide dashboard aluno/professor
 /// ======================================================================
 class RoleLandingPage extends StatelessWidget {
   const RoleLandingPage({super.key});
 
-  Future<String> _resolveRoute() async {
+  Future<String> _resolve() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return '/login';
 
     try {
-      final snap = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      final data = snap.data() ?? const <String, dynamic>{};
-      final role = (data['role'] ?? data['tipo'] ?? '').toString().toLowerCase();
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+
+      final role = (doc.data()?['role'] ?? doc.data()?['tipo'] ?? 'aluno')
+          .toString()
+          .toLowerCase();
 
       if (role == 'professor') return '/dashboard-professor';
-      if (role == 'aluno') return '/dashboard-aluno';
       return '/dashboard-aluno';
     } catch (_) {
       return '/dashboard-aluno';
@@ -203,22 +167,17 @@ class RoleLandingPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<String>(
-      future: _resolveRoute(),
+    return FutureBuilder(
+      future: _resolve(),
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const _GuardScaffold(
-            icon: Icons.hourglass_bottom_outlined,
-            title: 'Entrando…',
-            subtitle: 'Direcionando para seu painel.',
-            progress: true,
-          );
+        if (!snap.hasData) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
 
-        final route = snap.data ?? '/dashboard-aluno';
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (context.mounted) context.go(route);
+          if (context.mounted) context.go(snap.data.toString());
         });
+
         return const SizedBox.shrink();
       },
     );
@@ -226,138 +185,162 @@ class RoleLandingPage extends StatelessWidget {
 }
 
 /// ======================================================================
-/// 🧭 GoRouter principal
+/// 🚦 GoRouter Definitivo
 /// ======================================================================
 final GoRouter appRouter = GoRouter(
   initialLocation: '/login',
-  refreshListenable: GoRouterRefreshStream(FirebaseAuth.instance.authStateChanges()),
+  refreshListenable: GoRouterRefreshStream(
+    FirebaseAuth.instance.authStateChanges(),
+  ),
 
   redirect: (context, state) {
     final user = FirebaseAuth.instance.currentUser;
-    final isLoggedIn = user != null;
+    final logged = user != null;
     final path = state.uri.path;
 
-    const publicRoutes = {'/login', '/', '/landing'};
-    final isPublic = publicRoutes.contains(path);
+    const public = {'/', '/login'};
 
-    if (!isLoggedIn && !isPublic) return '/login';
-    if (isLoggedIn && (path == '/login' || path == '/')) return '/landing';
+    if (!logged && !public.contains(path)) return '/login';
+    if (logged && path == '/login') return '/landing';
+
     return null;
   },
 
   routes: [
-    GoRoute(path: '/login', builder: (context, _) => const LoginPage()),
-    GoRoute(path: '/', builder: (context, _) => const IndexPage()),
-    GoRoute(path: '/landing', builder: (context, _) => const RoleLandingPage()),
+    GoRoute(path: '/', builder: (_, __) => const IndexPage()),
+    GoRoute(path: '/login', builder: (_, __) => const LoginPage()),
+    GoRoute(path: '/landing', builder: (_, __) => const RoleLandingPage()),
 
-    // -----------------------
+    // =======================
     // Dashboards
-    // -----------------------
+    // =======================
     GoRoute(
       path: '/dashboard-aluno',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'aluno'},
         child: DashboardAlunoPage(),
       ),
     ),
     GoRoute(
       path: '/dashboard-professor',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: DashboardProfessorPage(),
       ),
     ),
 
-    // -----------------------
+    // =======================
     // Professor
-    // -----------------------
+    // =======================
     GoRoute(
       path: '/turmas',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: TurmasPage(),
       ),
     ),
     GoRoute(
       path: '/materiais',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: MateriaisPage(),
       ),
     ),
     GoRoute(
       path: '/atividades',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: AtividadesPage(),
       ),
     ),
     GoRoute(
       path: '/mensagens',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: MensagensPage(),
       ),
     ),
     GoRoute(
+      path: '/tabela_notas',
+      builder: (_, __) => const RoleGuard(
+        allowedRoles: {'professor'},
+        child: TabelaNotasPage(),
+      ),
+    ),
+    GoRoute(
+      path: '/desempenho_detalhado_page',
+      builder: (_, __) => const RoleGuard(
+        allowedRoles: {'professor'},
+        child: DesempenhoDetalhadoPage(),
+      ),
+    ),
+    GoRoute(
       path: '/alunos',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
         child: AlunosPage(),
       ),
     ),
     GoRoute(
-      path: '/tabela-notas', // ✅ nova rota de boletim/detalhes
-      builder: (context, _) => const RoleGuard(
+      path: '/admin-tools',
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'professor'},
-        child: TabelaNotasPage(),
+        child: AdminToolsPage(),
+      ),
+    ),
+    GoRoute(
+      path: '/admin/usuarios',
+      builder: (_, __) => const RoleGuard(
+        allowedRoles: {'professor'},
+        child: AdminUsuariosPage(),
       ),
     ),
 
-    // -----------------------
+    // =======================
     // Aluno
-    // -----------------------
+    // =======================
     GoRoute(
       path: '/aluno/materiais',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'aluno'},
         child: MateriaisAlunoPage(),
       ),
     ),
     GoRoute(
       path: '/aluno/notas',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'aluno'},
-        child: NotasAlunoPage(),
+        child: BoletimPage(),   // ✔ CORRIGIDO — agora abre o boletim certo
+      ),
+    ),
+    GoRoute(
+      path: '/aluno/atividades',
+      builder: (_, __) => const RoleGuard(
+        allowedRoles: {'aluno'},
+        child: AtividadesAlunoPage(),
       ),
     ),
     GoRoute(
       path: '/aluno/mensagens',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'aluno'},
         child: MensagensAlunoPage(),
       ),
     ),
     GoRoute(
       path: '/aluno/calendario',
-      builder: (context, _) => const RoleGuard(
+      builder: (_, __) => const RoleGuard(
         allowedRoles: {'aluno'},
         child: CalendarioAlunoPage(),
       ),
     ),
-
-    // -----------------------
+    // =======================
     // Comum
-    // -----------------------
-    GoRoute(
-      path: '/configuracoes',
-      builder: (context, _) => const SettingsPage(),
-    ),
-    GoRoute(
-      path: '/forbidden',
-      builder: (context, _) => const ForbiddenPage(),
-    ),
+    // =======================
+    GoRoute(path: '/boletim', builder: (_, __) => const BoletimPage()),
+    GoRoute(path: '/configuracoes', builder: (_, __) => const SettingsPage()),
+    GoRoute(path: '/forbidden', builder: (_, __) => const ForbiddenPage()),
   ],
 
-  errorBuilder: (context, state) => const NotFoundPage(),
+  errorBuilder: (_, __) => const NotFoundPage(),
 );

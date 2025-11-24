@@ -1,9 +1,13 @@
-﻿// lib/pages/dashboard_aluno.dart
-import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:go_router/go_router.dart';
-import 'package:poliedro_flutter/services/firestore_service.dart';
+﻿// ===============================================================
+// Dashboard Aluno — Versão Final + Correções Responsivas (SEM OVERFLOW)
+// ===============================================================
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 
 class DashboardAlunoPage extends StatefulWidget {
   const DashboardAlunoPage({super.key});
@@ -13,379 +17,288 @@ class DashboardAlunoPage extends StatefulWidget {
 }
 
 class _DashboardAlunoPageState extends State<DashboardAlunoPage> {
-  final FirestoreService _firestoreService = FirestoreService();
-  final User? currentUser = FirebaseAuth.instance.currentUser;
+  final _auth = FirebaseAuth.instance;
+  final _db = FirebaseFirestore.instance;
 
-  String alunoName = "Carregando...";
+  User? get currentUser => _auth.currentUser;
+
+  String alunoNome = "Carregando...";
   String alunoRA = "";
-  List<String> turmasAluno = [];
+  String turmaNome = "";
+  String? turmaId;
 
-  List<Map<String, dynamic>> notas = [];
-  List<Map<String, dynamic>> materiais = [];
   List<Map<String, dynamic>> atividades = [];
   List<Map<String, dynamic>> mensagens = [];
+  List<Map<String, dynamic>> notas = [];
 
-  int badgeTarefas = 0;
-  int badgeInbox = 0;
+  double mediaGeral = 0.0;
+  int pendentes = 0;
+  int novasMensagens = 0;
 
-  bool isLoading = true;
-  int _bottomIndex = 0;
-
-  final TextEditingController _respostaController = TextEditingController();
+  bool loading = true;
+  int bottomIndex = 0;
+  bool _jaAvisouPermissao = false;
 
   @override
   void initState() {
     super.initState();
-    carregarDados();
+    _carregarTudo();
   }
 
-  Future<void> carregarDados() async {
-    if (currentUser == null) return;
-
-    try {
-      final userData = await _firestoreService.getUserByUid(currentUser!.uid);
-      alunoName = userData?["nome"] ?? "Aluno(a)";
-      alunoRA = userData?["ra"] ?? "";
-      turmasAluno = List<String>.from(userData?["turmas"] ?? []);
-
-      // Notas do próprio aluno
-      notas = await _firestoreService.buscarNotasAluno(currentUser!.uid);
-
-      // Buscar atividades, materiais e mensagens das turmas do aluno
-      for (var turmaId in turmasAluno) {
-        final listaMateriais =
-            await _firestoreService.listarMateriaisPorTurma(turmaId);
-        materiais.addAll(listaMateriais);
-
-        final listaAtividades =
-            await _firestoreService.buscarAtividadesPorTurma(turmaId);
-        atividades.addAll(listaAtividades);
-
-        // Mensagens destinadas à turma OU diretamente ao aluno
-        final mensagensQuery = await FirebaseFirestore.instance
-            .collection("mensagens")
-            .where("destinatario", whereIn: [turmaId, alunoRA])
-            .orderBy("enviadaEm", descending: true)
-            .limit(10)
-            .get();
-
-        mensagens.addAll(
-          mensagensQuery.docs.map((e) => e.data() as Map<String, dynamic>),
-        );
-      }
-
-      badgeTarefas = atividades.length;
-      badgeInbox = mensagens.length;
-
-      if (mounted) setState(() => isLoading = false);
-    } catch (e) {
-      if (mounted) {
-        setState(() => isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Erro ao carregar dados: $e")),
-        );
-      }
-    }
-  }
-
-  num _mediaGeral() {
-    if (notas.isEmpty) return 0;
-    final total = notas
-        .map((n) => (n["nota"] ?? 0) as num)
-        .fold<num>(0, (a, b) => a + b);
-    return total / notas.length;
-  }
-
-  void _go(String path) {
+  // =======================================================
+  Future<void> _carregarTudo() async {
     if (!mounted) return;
-    context.push(path);
-  }
+    setState(() => loading = true);
 
-  // Envio de resposta para o professor
-  Future<void> _enviarResposta(String destinatarioProfessor) async {
-    final texto = _respostaController.text.trim();
-    if (texto.isEmpty) return;
+    final user = currentUser;
+    if (user == null) {
+      setState(() => loading = false);
+      return;
+    }
+
+    DocumentSnapshot<Map<String, dynamic>>? alunoSnap;
 
     try {
-      await FirebaseFirestore.instance.collection("mensagens").add({
-        "mensagem": texto,
-        "destinatario": destinatarioProfessor,
-        "alunoId": currentUser?.uid,
-        "alunoRA": alunoRA,
-        "enviadaEm": DateTime.now(),
-        "dataFormatada": "${DateTime.now().day.toString().padLeft(2, '0')}/"
-            "${DateTime.now().month.toString().padLeft(2, '0')}/"
-            "${DateTime.now().year}",
-      });
-
-      _respostaController.clear();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Mensagem enviada ao professor!")),
-        );
-      }
+      final doc = await _db.collection("users").doc(user.uid).get();
+      if (doc.exists) alunoSnap = doc;
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Erro ao enviar mensagem: $e")),
-        );
-      }
+      _mostrarErro("Erro ao acessar perfil do usuário.");
+    }
+
+    try {
+      final alunoSnap = await _db.collection("users").doc(user.uid).get();
+      final aluno = alunoSnap.data() ?? {};
+
+      alunoNome = aluno["nome"] ?? "Aluno";
+      alunoRA = aluno["ra"]?.toString() ?? "";
+
+      final turmasAluno = (aluno["turmas"] ?? []).cast<String>();
+      if (turmasAluno.isEmpty) throw Exception("Aluno sem turma.");
+
+      turmaId = turmasAluno.first;
+
+      final turmaSnap = await _db.collection("turmas").doc(turmaId).get();
+      turmaNome = turmaSnap.data()?["nome"] ?? "";
+    } on FirebaseException catch (e) {
+      _mostrarErro(
+        e.code == "permission-denied"
+            ? "Sem permissão para carregar seus dados."
+            : "Não foi possível carregar seu perfil.",
+        e,
+      );
+      alunoNome = "Aluno";
+      alunoRA = "";
+      turmaId = null;
+      turmaNome = "";
+      setState(() => loading = false);
+      return;
+    } catch (e) {
+      _mostrarErro("Erro: $e");
+      alunoNome = "Aluno";
+      alunoRA = "";
+      turmaId = null;
+      turmaNome = "";
+      setState(() => loading = false);
+      return;
+    }
+
+    atividades = await _carregarLista(
+      _db.collection("atividades").where("turmaId", isEqualTo: turmaId),
+      contexto: "atividades da turma",
+    );
+
+    notas = await _carregarLista(
+      _db.collection("notas").where("alunoRa", isEqualTo: alunoRA),
+      contexto: "suas notas",
+    );
+
+    mensagens = await _carregarLista(
+      _db.collection("threads").where("alunoRa", isEqualTo: alunoRA),
+      contexto: "mensagens",
+    );
+
+    mediaGeral = _calcMedia();
+    pendentes = _calcPendentes();
+    novasMensagens = mensagens.length;
+
+    if (!mounted) return;
+    setState(() => loading = false);
+  }
+
+  Future<List<Map<String, dynamic>>> _carregarLista(
+    Query<Map<String, dynamic>> query, {
+    required String contexto,
+  }) async {
+    try {
+      final snap = await query.get();
+      return snap.docs.map((d) => {"id": d.id, ...d.data()}).toList();
+    } on FirebaseException catch (e) {
+      _mostrarErro(
+        e.code == "permission-denied"
+            ? "Sem permissão para acessar $contexto."
+            : "Erro ao carregar $contexto.",
+        e,
+      );
+      return [];
+    } catch (_) {
+      return [];
     }
   }
 
+  void _mostrarErro(String mensagem, [FirebaseException? e]) {
+    if (!mounted) return;
+    if (e != null && e.code == "permission-denied") {
+      if (_jaAvisouPermissao) return;
+      _jaAvisouPermissao = true;
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(mensagem)));
+  }
+
+  double _calcMedia() {
+    if (notas.isEmpty) return 0;
+    final soma = notas.fold<double>(
+      0.0,
+      (a, n) => a + ((n["nota"] as num?)?.toDouble() ?? 0.0),
+    );
+    return soma / notas.length;
+  }
+
+  int _calcPendentes() {
+    if (atividades.isEmpty) return 0;
+    final realizadas = notas.map((n) => n["atividadeId"]).toSet();
+    int count = 0;
+    final agora = DateTime.now();
+
+    for (final a in atividades) {
+      final prazo = (a["prazo"] as Timestamp?)?.toDate() ??
+          (a["data"] as Timestamp?)?.toDate();
+
+      if (prazo != null &&
+          !realizadas.contains(a["id"]) &&
+          prazo.isAfter(agora)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  // =======================================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
-      body: isLoading
+      backgroundColor: const Color(0xfff6f7fb),
+      body: loading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                // HEADER
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.05),
-                        blurRadius: 4,
-                      )
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          Image.asset("assets/poliedro-logo.png", height: 40),
-                          const SizedBox(width: 10),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                "Bem-vindo, $alunoName",
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                "RA: $alunoRA • Portal do Aluno",
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            ],
-                          )
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          OutlinedButton.icon(
-                            onPressed: () => context.push('/configuracoes'),
-                            icon: const Icon(Icons.settings, size: 18),
-                            label: const Text("Configurações"),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton(
-                            onPressed: () async {
-                              await FirebaseAuth.instance.signOut();
-                              if (mounted) context.go('/login');
-                            },
-                            child: const Text("Sair"),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-
-                // BODY
-                Expanded(
-                  child: SingleChildScrollView(
+          : RefreshIndicator(
+              onRefresh: _carregarTudo,
+              child: ListView(
+                children: [
+                  _header(),
+                  Padding(
                     padding: const EdgeInsets.all(16),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // Métricas rápidas
-                        GridView.count(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          crossAxisCount: 2,
-                          childAspectRatio: 2.5,
-                          crossAxisSpacing: 10,
-                          mainAxisSpacing: 10,
-                          children: [
-                            _metricCard(
-                              title: 'Média Geral',
-                              value: _mediaGeral().toStringAsFixed(1),
-                              color: Colors.green,
-                              icon: Icons.star,
-                            ),
-                            _metricCard(
-                              title: 'Atividades Pendentes',
-                              value: atividades.length.toString(),
-                              color: Colors.orange,
-                              icon: Icons.flag,
-                            ),
-                            _metricCard(
-                              title: 'Mensagens Novas',
-                              value: mensagens.length.toString(),
-                              color: Colors.blue,
-                              icon: Icons.message_outlined,
-                            ),
-                            _metricCard(
-                              title: 'Presença',
-                              value: '95%',
-                              color: Colors.teal,
-                              icon: Icons.check_circle_outline,
-                            ),
-                          ],
-                        ),
+                        _metricasGrid(),
                         const SizedBox(height: 20),
-
-                        // Próximas Atividades
-                        const Text(
-                          "📚 Próximas Atividades",
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                        const SizedBox(height: 10),
-                        atividades.isEmpty
-                            ? const Text("Nenhuma atividade pendente 🎉")
-                            : Column(
-                                children: atividades.map((a) {
-                                  final titulo = a["titulo"] ?? "Atividade";
-                                  final turma =
-                                      a["turma"] ?? "Turma não informada";
-                                  final prazo = a["prazo"] != null
-                                      ? (a["prazo"] as Timestamp)
-                                          .toDate()
-                                          .toString()
-                                          .substring(0, 10)
-                                      : "—";
-
-                                  return Card(
-                                    child: ListTile(
-                                      leading: const Icon(
-                                          Icons.assignment_outlined,
-                                          color: Colors.orange),
-                                      title: Text(titulo),
-                                      subtitle:
-                                          Text("Turma: $turma\nPrazo: $prazo"),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-
+                        _atalhos(),
                         const SizedBox(height: 20),
-                        const Text(
-                          "💬 Mensagens Recentes",
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                        const SizedBox(height: 8),
-
-                        mensagens.isEmpty
-                            ? const Text("Nenhuma mensagem recente 📭")
-                            : Column(
-                                children: mensagens.map((m) {
-                                  final texto =
-                                      m["mensagem"] ?? "Mensagem sem texto";
-                                  final remetente = m["professorId"] != null
-                                      ? "Professor"
-                                      : "Sistema";
-                                  final data = m["dataFormatada"] ?? "";
-
-                                  return Card(
-                                    margin: const EdgeInsets.only(bottom: 8),
-                                    child: ListTile(
-                                      leading: const Icon(Icons.mail_outline,
-                                          color: Colors.blue),
-                                      title: Text(remetente),
-                                      subtitle: Text(texto),
-                                      trailing: Text(data,
-                                          style:
-                                              const TextStyle(fontSize: 12)),
-                                      onTap: () =>
-                                          _abrirDialogResposta(remetente),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
+                        _proximasAtividades(),
+                        const SizedBox(height: 20),
+                        _mensagensRecentes(),
                       ],
                     ),
-                  ),
-                ),
+                  )
+                ],
+              ),
+            ),
+      bottomNavigationBar: _bottom(),
+    );
+  }
+
+  // =======================================================
+  Widget _header() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      color: Colors.white,
+      child: Row(
+        children: [
+          Image.asset("assets/poliedro-logo.png", height: 42),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(alunoNome,
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold)),
+                Text("RA: $alunoRA • $turmaNome",
+                    style: const TextStyle(color: Colors.black54)),
               ],
             ),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        currentIndex: _bottomIndex,
-        onTap: (i) {
-          setState(() => _bottomIndex = i);
-          switch (i) {
-            case 1:
-              _go('/aluno/materiais');
-              break;
-            case 2:
-              _go('/aluno/notas');
-              break;
-            case 3:
-              _go('/aluno/mensagens');
-              break;
-          }
-        },
-        items: [
-          const BottomNavigationBarItem(
-            icon: Icon(Icons.dashboard),
-            label: 'Painel',
           ),
-          BottomNavigationBarItem(
-            icon: _badgeIcon(Icons.menu_book, count: materiais.length),
-            label: 'Materiais',
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _carregarTudo,
           ),
-          BottomNavigationBarItem(
-            icon: _badgeIcon(Icons.assignment, count: badgeTarefas),
-            label: 'Atividades',
-          ),
-          BottomNavigationBarItem(
-            icon: _badgeIcon(Icons.mail, count: badgeInbox),
-            label: 'Mensagens',
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.red),
+            onPressed: () async {
+              await _auth.signOut();
+              if (mounted) context.go("/login");
+            },
           ),
         ],
       ),
     );
   }
 
-  Widget _metricCard({
-    required String title,
-    required String value,
-    required Color color,
-    IconData? icon,
-  }) {
+  // =======================================================
+  Widget _metricasGrid() {
+    return GridView.count(
+      shrinkWrap: true,
+      crossAxisCount: 2,
+      mainAxisSpacing: 12,
+      crossAxisSpacing: 12,
+      physics: const NeverScrollableScrollPhysics(),
+      childAspectRatio: 2.3,
+      children: [
+        _metricCard("Média Geral", mediaGeral.toStringAsFixed(1),
+            Colors.teal.shade700),
+        _metricCard(
+            "Pendentes", pendentes.toString(), Colors.orange.shade700),
+        _metricCard("Mensagens", novasMensagens.toString(),
+            Colors.blue.shade700),
+      ],
+    );
+  }
+
+  Widget _metricCard(String title, String value, Color color) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(14),
         child: Row(
           children: [
-            if (icon != null) Icon(icon, color: color, size: 22),
-            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: color.withOpacity(.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(Icons.analytics, color: color),
+            ),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(title,
-                      style: const TextStyle(fontSize: 13, color: Colors.black54)),
+                      style: const TextStyle(color: Colors.black54)),
                   Text(value,
-                      style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: color)),
+                      style: const TextStyle(
+                          fontSize: 22, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
@@ -395,56 +308,163 @@ class _DashboardAlunoPageState extends State<DashboardAlunoPage> {
     );
   }
 
-  Widget _badgeIcon(IconData icon, {int count = 0}) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Icon(icon),
-        if (count > 0)
-          Positioned(
-            right: -6,
-            top: -4,
-            child: Container(
-              padding: const EdgeInsets.all(3),
-              decoration: BoxDecoration(
-                color: Colors.red,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-              child: Text(
-                count.toString(),
-                style: const TextStyle(color: Colors.white, fontSize: 10),
-                textAlign: TextAlign.center,
-              ),
+  // =======================================================
+  Widget _atalhos() {
+    Widget item(IconData ic, String title, String subtitle, String route) {
+      return InkWell(
+        onTap: () => context.push(route),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(ic, color: Colors.blue),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(title,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 14)),
+                      Text(subtitle,
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black54)),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
+        ),
+      );
+    }
+
+    return GridView.count(
+      shrinkWrap: true,
+      crossAxisCount: 2,
+      physics: const NeverScrollableScrollPhysics(),
+      childAspectRatio: 2.5,
+      children: [
+        item(Icons.menu_book, "Materiais", "Conteúdos", "/aluno/materiais"),
+        item(Icons.grading_rounded, "Minhas Notas", "Boletim",
+            "/aluno/notas"),
+        item(Icons.chat, "Mensagens", "Chat", "/aluno/mensagens"),
+        item(Icons.event, "Calendário", "Prazos", "/aluno/calendario"),
       ],
     );
   }
 
-  void _abrirDialogResposta(String professor) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text("Responder para $professor"),
-        content: TextField(
-          controller: _respostaController,
-          decoration:
-              const InputDecoration(labelText: "Digite sua resposta..."),
-          maxLines: 3,
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("Cancelar")),
-          ElevatedButton(
-              onPressed: () {
-                _enviarResposta(professor);
-                Navigator.pop(context);
-              },
-              child: const Text("Enviar")),
-        ],
-      ),
+  // =======================================================
+  Widget _proximasAtividades() {
+    final proximas = atividades.where((a) {
+      final prazo = (a["prazo"] as Timestamp?)?.toDate() ??
+          (a["data"] as Timestamp?)?.toDate();
+      return prazo != null && prazo.isAfter(DateTime.now());
+    }).take(5).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text("Próximas Atividades",
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 10),
+        if (proximas.isEmpty)
+          const Card(
+            child: ListTile(title: Text("Nenhuma atividade pendente 🎉")),
+          )
+        else
+          ...proximas.map((a) {
+            final prazo = ((a["prazo"] ?? a["data"]) as Timestamp).toDate();
+            final prazoStr = DateFormat("dd/MM").format(prazo);
+
+            return Card(
+              child: ListTile(
+                title: Text(a["titulo"] ?? "Atividade"),
+                subtitle: Text("Prazo: $prazoStr"),
+                trailing: Text(a["tipo"] ?? ""),
+              ),
+            );
+          })
+      ],
+    );
+  }
+
+  // =======================================================
+  Widget _mensagensRecentes() {
+    final ultimas = mensagens.take(4).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text("Mensagens Recentes",
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 10),
+        if (ultimas.isEmpty)
+          const Card(
+              child: ListTile(title: Text("Nenhuma mensagem 📭")))
+        else
+          ...ultimas.map((m) {
+            final ultima = m["lastMessage"] ?? "";
+            final ts = m["updatedAt"];
+            final dt = ts is Timestamp ? ts.toDate() : null;
+            final dtStr =
+                dt != null ? DateFormat("dd/MM").format(dt) : "-";
+
+            return Card(
+              child: ListTile(
+                title: const Text("Professor",
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text(
+                  ultima,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: Text(dtStr),
+              ),
+            );
+          })
+      ],
+    );
+  }
+
+  // =======================================================
+  Widget _bottom() {
+    return BottomNavigationBar(
+      type: BottomNavigationBarType.fixed,
+      currentIndex: bottomIndex,
+      onTap: (i) {
+        setState(() => bottomIndex = i);
+        switch (i) {
+          case 1:
+            context.push("/aluno/calendario");
+            break;
+          case 2:
+            context.push("/aluno/atividades");
+            break;
+          case 3:
+            context.push("/aluno/mensagens");
+            break;
+        }
+      },
+      items: const [
+        BottomNavigationBarItem(
+            icon: Icon(Icons.dashboard), label: "Painel"),
+        BottomNavigationBarItem(
+            icon: Icon(Icons.event_note), label: "Calendário"),
+        BottomNavigationBarItem(
+            icon: Icon(Icons.checklist), label: "Tarefas"),
+        BottomNavigationBarItem(
+            icon: Icon(Icons.mail_outline), label: "Mensagens"),
+      ],
     );
   }
 }
