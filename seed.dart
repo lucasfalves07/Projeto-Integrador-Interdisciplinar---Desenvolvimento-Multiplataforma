@@ -26,7 +26,7 @@ Future<void> main() async {
 
   print("📌 Turmas: ${turmas.size}");
   print("📌 Disciplinas: ${disciplinas.size}");
-  print("📌 Alunos: ${alunos.size}");
+  print("📌 Alunos: ${alunos.size}")
 
   // ------------------------------------------------------------------
   // ✅ 1. Criar MURAL DAS TURMAS (mensagens públicas)
