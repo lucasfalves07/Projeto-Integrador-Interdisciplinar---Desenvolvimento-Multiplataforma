@@ -237,4 +237,5 @@ Future<void> main() async {
   }
 
   print("\n🎉 SEED FINALIZADO — APENAS O QUE FALTAVA FOI CRIADO!");
+  }
 
