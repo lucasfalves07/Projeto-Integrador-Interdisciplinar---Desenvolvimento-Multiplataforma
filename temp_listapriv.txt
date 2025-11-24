@@ -1,5 +1,5 @@
   Widget _listaMensagensPrivadas(String profUid) {
-    final q = _buscaCtrl.text.trim().toLowerCase();
+    final q = _buscaCtrl.text.trim().toLowerCase()
     // key removido (usamos thread aleatória)
 
     return StreamBuilder<QuerySnapshot>(
